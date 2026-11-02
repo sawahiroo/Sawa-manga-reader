@@ -260,12 +260,12 @@ describe('storage v4 migration defaults', () => {
       favorites: { retained: true }
     });
 
-    expect(STORAGE_VERSION).toBe(4);
-    expect(STATE_VERSION).toBe(4);
+    expect(STORAGE_VERSION).toBe(7);
+    expect(STATE_VERSION).toBe(7);
     expect(migrated).toMatchObject({
-      version: 4,
-      stateVersion: 4,
-      session: { version: 4 },
+      version: 7,
+      stateVersion: 7,
+      session: { version: 8 },
       ui: {
         chapterCardSize: 'comfortable',
         pagePreviewSize: 'comfortable',

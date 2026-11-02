@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { buildDoubleSpreadRanges, buildMangaJPSpreadRanges } from '../utils/reader.js';
 import {
   createPanelFromDrag,
@@ -12,10 +12,13 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   EditIcon,
+  BookIcon,
   FullscreenIcon,
   LayoutGridIcon,
   LayersIcon,
   ScrollIcon,
+  SettingsIcon,
+  PinIcon,
   ZoomInIcon,
   ZoomOutIcon
 } from './Icons.jsx';
@@ -24,6 +27,14 @@ const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.1;
 const AUTO_HIDE_DELAY = 3000;
+export const HORIZON_READER_TOOL_IDS = Object.freeze([
+  'exit',
+  'bookmark',
+  'notes',
+  'guided-view',
+  'settings',
+  'fullscreen'
+]);
 const DEFAULT_VISUAL_PREFS = Object.freeze({
   enabled: false,
   preset: 'custom',
@@ -120,10 +131,14 @@ function ReaderView({
   focusToken,
   initialPageIndex,
   initialReaderState,
+  readerIntent,
+  entryNotice,
   preferredMode,
   preferredFitMode,
   preferredZoom = 1,
   autoHideUI = false,
+  controlsHideMs = AUTO_HIDE_DELAY,
+  visualVariant = 'classic',
   onExit,
   onOpenChapter,
   onUpdateProgress,
@@ -132,16 +147,22 @@ function ReaderView({
   onContextMenu
 }) {
   const [mode, setMode] = useState(preferredMode || initialReaderState?.mode || 'single');
-  const [currentPageIndex, setCurrentPageIndex] = useState(initialPageIndex || 0);
+  const [currentPageIndex, setCurrentPageIndex] = useState(initialPageIndex ?? 0);
   const [zoom, setZoom] = useState(clampZoom(preferredZoom || initialReaderState?.zoom || 1));
   const [uiHidden, setUiHidden] = useState(false);
   const [fitMode, setFitMode] = useState(preferredFitMode || initialReaderState?.fitMode || 'fit-width');
   const [notesOpen, setNotesOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState('');
   const [webtoonScrollState, setWebtoonScrollState] = useState({
     top: Number(initialReaderState?.scrollTop || 0),
-    ratio: Number(initialReaderState?.scrollRatio || 0)
+    ratio: Number(initialReaderState?.scrollRatio || 0),
+    anchorPageIndex: Number.isFinite(Number(initialReaderState?.anchorPageIndex))
+      ? Number(initialReaderState.anchorPageIndex)
+      : Number(initialPageIndex || 0),
+    intraPageOffset: Number(initialReaderState?.intraPageOffset || 0)
   });
+  const [readerNotice, setReaderNotice] = useState(entryNotice || '');
   const [visualDrawerOpen, setVisualDrawerOpen] = useState(false);
   const [visualScope, setVisualScope] = useState('global');
   const [globalVisualPrefs, setGlobalVisualPrefs] = useState(DEFAULT_VISUAL_PREFS);
@@ -155,7 +176,13 @@ function ReaderView({
   const [guidedSaveState, setGuidedSaveState] = useState('idle');
   const shellRef = useRef(null);
   const webtoonContainerRef = useRef(null);
-  const hasRestoredWebtoonScrollRef = useRef(false);
+  const webtoonRestoreRef = useRef({ phase: 'pending', userInteracted: false });
+  const latestProgressRef = useRef(null);
+  const onUpdateProgressRef = useRef(onUpdateProgress);
+  const furthestPageIndexRef = useRef(Math.max(
+    Number(initialReaderState?.furthestPageIndex || 0),
+    Number(initialPageIndex || 0)
+  ));
   const autoHideTimerRef = useRef(null);
   const manualUiHiddenRef = useRef(false);
   const preloadedPagesRef = useRef(null);
@@ -234,25 +261,49 @@ function ReaderView({
     if (previousChapter) onOpenChapter?.(previousChapter.id);
   }, [previousChapter, onOpenChapter]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setMode(preferredMode || 'single');
-  }, [preferredMode, chapter.id]);
-
-  useEffect(() => {
-    setCurrentPageIndex(initialPageIndex || 0);
-  }, [chapter.id, initialPageIndex]);
-
-  useEffect(() => {
+    setCurrentPageIndex(initialPageIndex ?? 0);
     setZoom(clampZoom(preferredZoom || 1));
     setFitMode(preferredFitMode || 'fit-width');
     setUiHidden(manualUiHiddenRef.current);
     setNoteDraft('');
     setWebtoonScrollState({
       top: Number(initialReaderState?.scrollTop || 0),
-      ratio: Number(initialReaderState?.scrollRatio || 0)
+      ratio: Number(initialReaderState?.scrollRatio || 0),
+      anchorPageIndex: Number.isFinite(Number(initialReaderState?.anchorPageIndex))
+        ? Number(initialReaderState.anchorPageIndex)
+        : Number(initialPageIndex || 0),
+      intraPageOffset: Number(initialReaderState?.intraPageOffset || 0)
     });
-    hasRestoredWebtoonScrollRef.current = false;
-  }, [chapter.id, initialReaderState?.scrollTop, initialReaderState?.scrollRatio, preferredFitMode, preferredZoom]);
+    furthestPageIndexRef.current = Math.max(
+      Number(initialReaderState?.furthestPageIndex || 0),
+      Number(initialPageIndex || 0)
+    );
+    webtoonRestoreRef.current = { phase: 'pending', userInteracted: false };
+    setReaderNotice(entryNotice || '');
+    // Progress updates are mirrored back into initialPageIndex/initialReaderState by
+    // the active tab. They must not re-arm the entry restoration while the user is
+    // reading, otherwise the original page is imposed again after every save.
+    // A chapter/intent change is the only real navigation boundary.
+  }, [
+    chapter.id,
+    readerIntent?.token
+  ]);
+
+  useEffect(() => {
+    onUpdateProgressRef.current = onUpdateProgress;
+  }, [onUpdateProgress]);
+
+  useEffect(() => {
+    furthestPageIndexRef.current = Math.max(furthestPageIndexRef.current, currentPageIndex);
+  }, [currentPageIndex]);
+
+  useEffect(() => {
+    if (!readerNotice) return undefined;
+    const timer = window.setTimeout(() => setReaderNotice(''), 1800);
+    return () => window.clearTimeout(timer);
+  }, [readerNotice]);
 
   const clearAutoHideTimer = useCallback(() => {
     if (autoHideTimerRef.current) {
@@ -268,14 +319,14 @@ function ReaderView({
       return;
     }
     setUiHidden(false);
-    if (autoHideUI) {
+    if (autoHideUI && !settingsOpen && !notesOpen && !visualDrawerOpen && !guidedEditMode) {
       autoHideTimerRef.current = setTimeout(() => {
         if (!manualUiHiddenRef.current) {
           setUiHidden(true);
         }
-      }, AUTO_HIDE_DELAY);
+      }, Math.max(1000, Math.min(10000, Number(controlsHideMs) || AUTO_HIDE_DELAY)));
     }
-  }, [autoHideUI, clearAutoHideTimer]);
+  }, [autoHideUI, clearAutoHideTimer, controlsHideMs, guidedEditMode, notesOpen, settingsOpen, visualDrawerOpen]);
 
   useEffect(() => {
     if (!autoHideUI) {
@@ -407,28 +458,78 @@ function ReaderView({
   useEffect(() => {
     if (mode !== 'webtoon' || !safePages.length) return undefined;
     const container = webtoonContainerRef.current;
-    if (!container || hasRestoredWebtoonScrollRef.current) return undefined;
+    if (!container || webtoonRestoreRef.current.phase !== 'pending') return undefined;
 
-    const applyScroll = () => {
+    let rafId = null;
+    let fallbackTimer = null;
+    let attempts = 0;
+
+    const stopRestoring = () => {
+      webtoonRestoreRef.current = { phase: 'interaction', userInteracted: true };
+    };
+    container.addEventListener('wheel', stopRestoring, { passive: true, once: true });
+    container.addEventListener('pointerdown', stopRestoring, { passive: true, once: true });
+    container.addEventListener('touchstart', stopRestoring, { passive: true, once: true });
+
+    const applyScroll = ({ allowFallback = false } = {}) => {
+      if (webtoonRestoreRef.current.userInteracted) return true;
+      const requestedPage = Math.max(0, Math.min(
+        safePages.length - 1,
+        Number(readerIntent?.kind === 'exact-page' || readerIntent?.kind === 'restart'
+          ? initialPageIndex
+          : (initialReaderState?.anchorPageIndex ?? initialPageIndex)) || 0
+      ));
+      const pageElement = container.querySelector(`[data-page-index="${requestedPage}"]`);
+      const hasPageAnchor = pageElement && (
+        readerIntent?.kind === 'exact-page'
+        || readerIntent?.kind === 'restart'
+        || Number.isFinite(Number(initialReaderState?.anchorPageIndex))
+      );
+      // Images can be measured after the reader itself has mounted. Restoring a
+      // later page while its offset is still zero would incorrectly validate page 1.
+      if (hasPageAnchor && requestedPage > 0 && Number(pageElement?.offsetTop || 0) <= 0 && !allowFallback) {
+        return false;
+      }
+      webtoonRestoreRef.current.phase = 'measured';
       const maxScrollable = Math.max(0, container.scrollHeight - container.clientHeight);
-      const ratio = Math.max(0, Math.min(1, Number(webtoonScrollState?.ratio || 0)));
-      const targetTop = maxScrollable > 0
-        ? Math.round(maxScrollable * ratio)
-        : Math.max(0, Number(webtoonScrollState?.top || 0));
-      container.scrollTo({ top: targetTop, behavior: 'auto' });
-      hasRestoredWebtoonScrollRef.current = true;
+      const targetTop = hasPageAnchor
+        ? Math.max(0, Number(pageElement.offsetTop || 0) + (
+          readerIntent?.kind === 'normal' ? Number(initialReaderState?.intraPageOffset || 0) : 0
+        ))
+        : (maxScrollable > 0
+          ? Math.round(maxScrollable * Math.max(0, Math.min(1, Number(initialReaderState?.scrollRatio || 0))))
+          : Math.max(0, Number(initialReaderState?.scrollTop || 0)));
+      const previousScrollBehavior = container.style.scrollBehavior;
+      container.style.scrollBehavior = 'auto';
+      container.scrollTop = targetTop;
+      window.requestAnimationFrame(() => {
+        if (container.isConnected) container.style.scrollBehavior = previousScrollBehavior;
+      });
+      setCurrentPageIndex(requestedPage);
+      webtoonRestoreRef.current = { phase: 'restored', userInteracted: false };
+      return true;
     };
 
-    const raf1 = window.requestAnimationFrame(() => applyScroll());
-    const raf2 = window.requestAnimationFrame(() => window.requestAnimationFrame(() => applyScroll()));
-    const timer = window.setTimeout(() => applyScroll(), 120);
+    const restoreWhenMeasured = () => {
+      rafId = null;
+      if (webtoonRestoreRef.current.phase !== 'pending') return;
+      attempts += 1;
+      if (applyScroll()) return;
+      if (attempts < 300) rafId = window.requestAnimationFrame(restoreWhenMeasured);
+    };
+    rafId = window.requestAnimationFrame(restoreWhenMeasured);
+    fallbackTimer = window.setTimeout(() => {
+      if (webtoonRestoreRef.current.phase === 'pending') applyScroll({ allowFallback: true });
+    }, 5000);
 
     return () => {
-      window.cancelAnimationFrame(raf1);
-      window.cancelAnimationFrame(raf2);
-      window.clearTimeout(timer);
+      if (rafId != null) window.cancelAnimationFrame(rafId);
+      if (fallbackTimer != null) window.clearTimeout(fallbackTimer);
+      container.removeEventListener('wheel', stopRestoring);
+      container.removeEventListener('pointerdown', stopRestoring);
+      container.removeEventListener('touchstart', stopRestoring);
     };
-  }, [mode, chapter.id, safePages.length, webtoonScrollState]);
+  }, [mode, chapter.id, initialPageIndex, initialReaderState?.anchorPageIndex, readerIntent?.kind, readerIntent?.token, safePages.length]);
 
   const increaseZoom = () => setZoom((value) => clampZoom(value + ZOOM_STEP));
   const decreaseZoom = () => setZoom((value) => clampZoom(value - ZOOM_STEP));
@@ -738,15 +839,27 @@ function ReaderView({
   }, [safePages.length, currentPageIndex, mode, currentMangaJPSpreadIndex, currentSpreadIndex, openPreviousChapter, guidedMode, currentGuidedPanels.length, guidedSelectionIndex]);
 
   const toggleUiHidden = useCallback(() => {
-    manualUiHiddenRef.current = !manualUiHiddenRef.current;
-    if (manualUiHiddenRef.current) {
-      clearAutoHideTimer();
-      setUiHidden(true);
+    if (uiHidden) {
+      manualUiHiddenRef.current = false;
+      setUiHidden(false);
+      resetAutoHideTimer();
       return;
     }
-    setUiHidden(false);
-    resetAutoHideTimer();
-  }, [clearAutoHideTimer, resetAutoHideTimer]);
+    manualUiHiddenRef.current = true;
+    clearAutoHideTimer();
+    setUiHidden(true);
+  }, [clearAutoHideTimer, resetAutoHideTimer, uiHidden]);
+
+  const jumpToPage = useCallback((value) => {
+    const targetIndex = Math.max(0, Math.min(safePages.length - 1, Number(value) || 0));
+    setCurrentPageIndex(targetIndex);
+    if (mode !== 'webtoon') return;
+    const container = webtoonContainerRef.current;
+    const target = container?.querySelector?.(`[data-page-index="${targetIndex}"]`);
+    if (!container || !target) return;
+    webtoonRestoreRef.current = { phase: 'interaction', userInteracted: true };
+    container.scrollTo({ top: Number(target.offsetTop || 0), behavior: 'auto' });
+  }, [mode, safePages.length]);
 
   const handleSaveAnnotation = useCallback(async () => {
     if (!onAddAnnotation) return;
@@ -856,23 +969,41 @@ function ReaderView({
 
   useEffect(() => {
     if (!safePages.length) return undefined;
+    const payload = {
+      mangaId: manga.id,
+      chapterId: chapter.id,
+      pageIndex: currentPageIndex,
+      furthestPageIndex: Math.max(furthestPageIndexRef.current, currentPageIndex),
+      pageCount: chapter.pageCount,
+      mode,
+      fitMode,
+      zoom,
+      scrollTop: mode === 'webtoon' ? webtoonScrollState.top : 0,
+      scrollRatio: mode === 'webtoon' ? webtoonScrollState.ratio : 0,
+      anchorPageIndex: mode === 'webtoon' ? webtoonScrollState.anchorPageIndex : currentPageIndex,
+      intraPageOffset: mode === 'webtoon' ? webtoonScrollState.intraPageOffset : 0
+    };
+    latestProgressRef.current = payload;
     const timeout = window.setTimeout(() => {
-      const payload = {
-        mangaId: manga.id,
-        chapterId: chapter.id,
-        pageIndex: currentPageIndex,
-        pageCount: chapter.pageCount,
-        mode,
-        fitMode,
-        zoom,
-        scrollTop: mode === 'webtoon' ? webtoonScrollState.top : 0,
-        scrollRatio: mode === 'webtoon' ? webtoonScrollState.ratio : 0
-      };
-      onUpdateProgress(payload);
+      onUpdateProgress?.(payload);
     }, 180);
 
     return () => window.clearTimeout(timeout);
   }, [manga.id, chapter.id, currentPageIndex, chapter.pageCount, mode, fitMode, zoom, webtoonScrollState, safePages.length, onUpdateProgress]);
+
+  useEffect(() => () => {
+    if (latestProgressRef.current) {
+      onUpdateProgressRef.current?.(latestProgressRef.current, { immediate: true });
+    }
+  }, []);
+
+  useEffect(() => {
+    const flushLatestPosition = () => {
+      if (latestProgressRef.current) onUpdateProgressRef.current?.(latestProgressRef.current, { immediate: true });
+    };
+    window.addEventListener('blur', flushLatestPosition);
+    return () => window.removeEventListener('blur', flushLatestPosition);
+  }, []);
 
   useEffect(() => {
     if (mode !== 'webtoon' || !safePages.length) return undefined;
@@ -885,6 +1016,9 @@ function ReaderView({
     let rafId = null;
     const measure = () => {
       rafId = null;
+      // The DOM starts at scrollTop 0 even when a saved location exists. Do not
+      // publish that transient value while the one-shot restoration is pending.
+      if (webtoonRestoreRef.current.phase === 'pending' || webtoonRestoreRef.current.phase === 'measured') return;
       const images = container.querySelectorAll('[data-page-index]');
       let bestIndex = 0;
       let bestDistance = Number.POSITIVE_INFINITY;
@@ -899,10 +1033,13 @@ function ReaderView({
       }
       const maxScrollable = Math.max(0, container.scrollHeight - container.clientHeight);
       const currentTop = container.scrollTop || 0;
+      const anchorElement = container.querySelector(`[data-page-index="${bestIndex}"]`);
       setCurrentPageIndex(bestIndex);
       setWebtoonScrollState({
         top: currentTop,
-        ratio: maxScrollable > 0 ? currentTop / maxScrollable : 0
+        ratio: maxScrollable > 0 ? currentTop / maxScrollable : 0,
+        anchorPageIndex: bestIndex,
+        intraPageOffset: Math.max(0, currentTop - Number(anchorElement?.offsetTop || 0))
       });
     };
     const handleScroll = () => {
@@ -964,13 +1101,41 @@ function ReaderView({
   function getSinglePageStyle() {
     switch (fitMode) {
       case 'fit-height':
-        return { height: '100%', maxHeight: 'calc(100vh - 200px)' };
+        return visualVariant === 'horizon'
+          ? { height: 'calc(100vh - 44px)', maxHeight: 'calc(100vh - 44px)', width: 'auto', maxWidth: 'calc(100% - 128px)' }
+          : { height: '100%', maxHeight: 'calc(100vh - 200px)' };
       case 'original':
-        return { transform: `scale(${zoom})`, transformOrigin: 'center top' };
+        return visualVariant === 'horizon'
+          ? { width: 'auto', maxWidth: 'none', height: 'auto', maxHeight: 'none', zoom }
+          : { transform: `scale(${zoom})`, transformOrigin: 'center top' };
       case 'fit-width':
       default:
-        return { width: `${Math.max(55, zoom * 100)}%`, maxWidth: `${980 * zoom}px` };
+        return visualVariant === 'horizon'
+          ? { width: `min(calc(100% - 128px), ${Math.round(980 * zoom)}px)`, maxWidth: 'calc(100% - 128px)', height: 'auto', maxHeight: 'none' }
+          : { width: `${Math.max(55, zoom * 100)}%`, maxWidth: `${980 * zoom}px` };
     }
+  }
+
+  function getSpreadPageStyle() {
+    if (visualVariant !== 'horizon') return { maxWidth: `${480 * zoom}px` };
+    if (fitMode === 'fit-height') {
+      return { width: 'auto', maxWidth: 'calc(50% - 2px)', height: 'calc(100vh - 44px)', maxHeight: 'calc(100vh - 44px)' };
+    }
+    if (fitMode === 'original') {
+      return { width: 'auto', maxWidth: 'none', height: 'auto', maxHeight: 'none', zoom };
+    }
+    return { width: `min(calc(50% - 2px), ${Math.round(620 * zoom)}px)`, maxWidth: 'calc(50% - 2px)', height: 'auto', maxHeight: 'calc(100vh - 40px)' };
+  }
+
+  function getWebtoonPageStyle() {
+    if (visualVariant !== 'horizon') return { maxWidth: `${960 * zoom}px` };
+    if (fitMode === 'fit-height') {
+      return { width: 'auto', maxWidth: 'calc(100% - 144px)', height: 'calc(100vh - 44px)', maxHeight: 'calc(100vh - 44px)', objectFit: 'contain' };
+    }
+    if (fitMode === 'original') {
+      return { width: 'auto', maxWidth: 'none', height: 'auto', maxHeight: 'none', zoom };
+    }
+    return { width: `min(calc(100% - 144px), ${Math.round(960 * zoom)}px)`, maxWidth: 'calc(100% - 144px)', height: 'auto', maxHeight: 'none' };
   }
 
   const currentSpread = spreads[currentSpreadIndex] || { start: 0, end: 0 };
@@ -995,10 +1160,129 @@ function ReaderView({
     <section
       ref={shellRef}
       tabIndex={-1}
-      className={`reader-shell ${uiHidden ? 'reader-shell-ui-hidden' : ''}`}
+      className={`reader-shell reader-${visualVariant} reader-mode-${mode} reader-fit-${fitMode} ${uiHidden ? 'reader-shell-ui-hidden' : ''}`}
       data-visual-reader={visualReaderEnabled && activeVisualPrefs.enabled && !comparePreviewActive ? 'active' : 'inactive'}
       onContextMenu={handleShellContextMenu}
     >
+      {readerNotice ? (
+        <div className="reader-entry-notice" role="status" aria-live="polite">
+          {readerNotice}
+        </div>
+      ) : null}
+      {visualVariant === 'horizon' ? (
+        <>
+          <nav className="reader-horizon-chapter-capsule" aria-label="Navigation entre chapitres">
+            <button
+              type="button"
+              onClick={openPreviousChapter}
+              disabled={!previousChapter}
+              title={previousChapter ? `Chapitre precedent : ${previousChapter.name}` : 'Aucun chapitre precedent'}
+            >
+              <ChevronLeftIcon size={16} />
+            </button>
+            <label>
+              <span className="sr-only">Chapitre courant</span>
+              <select value={chapter.id} onChange={(event) => onOpenChapter?.(event.target.value)}>
+                {chapters.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+              <ChevronDownIcon size={13} aria-hidden="true" />
+            </label>
+            <span className="reader-horizon-position">{currentPageIndex + 1}/{safePages.length}</span>
+            <button
+              type="button"
+              onClick={openNextChapter}
+              disabled={!nextChapter}
+              title={nextChapter ? `Chapitre suivant : ${nextChapter.name}` : 'Aucun chapitre suivant'}
+            >
+              <ChevronRightIcon size={16} />
+            </button>
+          </nav>
+
+          <label className="reader-horizon-progress" title={`Page ${currentPageIndex + 1} sur ${safePages.length}`}>
+            <span>{currentPageIndex + 1}</span>
+            <input
+              type="range"
+              min="1"
+              max={Math.max(1, safePages.length)}
+              value={currentPageIndex + 1}
+              onChange={(event) => jumpToPage(Number(event.target.value) - 1)}
+              aria-label={`Aller a une page, page actuelle ${currentPageIndex + 1} sur ${safePages.length}`}
+            />
+            <small>{safePages.length}</small>
+          </label>
+
+          <nav className="reader-horizon-tool-rail" aria-label="Outils du lecteur">
+            <button type="button" data-reader-tool="exit" onClick={onExit} title="Quitter le lecteur"><ChevronLeftIcon size={18} /></button>
+            <button type="button" data-reader-tool="bookmark" onClick={handleSaveAnnotation} title="Enregistrer un repere"><PinIcon size={17} /></button>
+            <button type="button" data-reader-tool="notes" className={notesOpen ? 'active' : ''} onClick={() => setNotesOpen((value) => !value)} title="Notes du chapitre">
+              <BookIcon size={17} />
+              {chapterAnnotations.length > 0 ? <span className="reader-tool-badge">{Math.min(99, chapterAnnotations.length)}</span> : null}
+            </button>
+            {guidedViewEnabled ? (
+              <button type="button" data-reader-tool="guided-view" className={guidedMode ? 'active' : ''} onClick={handleToggleGuidedMode} title="Lecture guidee"><LayersIcon size={17} /></button>
+            ) : null}
+            <button type="button" data-reader-tool="settings" className={settingsOpen ? 'active' : ''} onClick={() => setSettingsOpen((value) => !value)} title="Reglages du lecteur"><SettingsIcon size={18} /></button>
+            <button type="button" data-reader-tool="fullscreen" onClick={() => window.mangaAPI.toggleFullScreen()} title="Plein ecran"><FullscreenIcon size={17} /></button>
+          </nav>
+
+          {settingsOpen ? (
+            <aside className="reader-horizon-settings" aria-label="Reglages du lecteur">
+              <header>
+                <div><strong>Reglages</strong><span>{manga.displayTitle}</span></div>
+                <button type="button" className="icon-pill" onClick={() => setSettingsOpen(false)} aria-label="Fermer les reglages">×</button>
+              </header>
+
+              <section>
+                <h3>Lecture</h3>
+                <div className="reader-settings-grid reader-settings-grid-four">
+                  <button className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}><LayoutGridIcon size={15} /> Simple</button>
+                  <button className={mode === 'double' ? 'active' : ''} onClick={() => setMode('double')}><LayoutGridIcon size={15} /> Double</button>
+                  <button className={mode === 'manga-jp' ? 'active' : ''} onClick={() => setMode('manga-jp')}><LayoutGridIcon size={15} /> Manga JP</button>
+                  <button className={mode === 'webtoon' ? 'active' : ''} onClick={() => setMode('webtoon')}><ScrollIcon size={15} /> Webtoon</button>
+                </div>
+              </section>
+
+              <section>
+                <h3>Ajustement</h3>
+                <div className="reader-settings-grid">
+                  <button className={fitMode === 'fit-width' ? 'active' : ''} onClick={() => setFitMode('fit-width')}>Largeur</button>
+                  <button className={fitMode === 'fit-height' ? 'active' : ''} onClick={() => setFitMode('fit-height')}>Hauteur</button>
+                  <button className={fitMode === 'original' ? 'active' : ''} onClick={() => setFitMode('original')}>Original</button>
+                </div>
+                <div className="reader-settings-zoom">
+                  <button type="button" onClick={decreaseZoom} disabled={zoom <= MIN_ZOOM}><ZoomOutIcon size={16} /></button>
+                  <button type="button" onClick={resetZoom}>{zoomPercent}</button>
+                  <button type="button" onClick={increaseZoom} disabled={zoom >= MAX_ZOOM}><ZoomInIcon size={16} /></button>
+                </div>
+              </section>
+
+              <section>
+                <h3>Image</h3>
+                {visualReaderEnabled ? (
+                  <button type="button" className={`reader-settings-wide ${visualDrawerOpen ? 'active' : ''}`} onClick={() => { setVisualDrawerOpen(true); setSettingsOpen(false); }}>
+                    Profils visuels et comparaison <span>{visualStatusLabel}</span>
+                  </button>
+                ) : <p className="reader-settings-muted">Le module visuel experimental est desactive.</p>}
+              </section>
+
+              <section>
+                <h3>Guidage</h3>
+                {guidedViewEnabled ? (
+                  <div className="reader-settings-grid">
+                    <button className={guidedMode ? 'active' : ''} onClick={handleToggleGuidedMode}>Activer</button>
+                    <button className={guidedEditMode ? 'active' : ''} onClick={handleToggleGuidedEditMode}><EditIcon size={14} /> {guidedEditMode ? 'Fin edition' : 'Editer les cases'}</button>
+                  </div>
+                ) : <p className="reader-settings-muted">Le guidage experimental est desactive.</p>}
+              </section>
+
+              <section>
+                <h3>Aide</h3>
+                <p className="reader-shortcuts-help">←/→ pages · Ctrl/Alt + ←/→ chapitres · +/− zoom · 0 reinitialiser · F plein ecran · H masquer les commandes</p>
+              </section>
+            </aside>
+          ) : null}
+        </>
+      ) : (
       <div className="reader-toolbar">
         <div className="reader-toolbar-left">
           <button className="ghost-button" onClick={onExit}><ChevronLeftIcon size={16} /> Quitter</button>
@@ -1121,6 +1405,7 @@ function ReaderView({
           </button>
         </div>
       </div>
+      )}
 
       {visualReaderEnabled && visualDrawerOpen && (
         <section className="reader-visual-drawer">
@@ -1324,7 +1609,7 @@ function ReaderView({
 
       {mode === 'single' && (
         <div className="reader-stage" onClick={handleStageToggle}>
-          <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={!canGoPreviousSingle}><ChevronLeftIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={!canGoPreviousSingle}><ChevronLeftIcon size={20} /></button> : null}
           <div className="reader-page-wrap" tabIndex={0} onClick={handleStageToggle}>
             <div
               ref={guidedSurfaceRef}
@@ -1393,20 +1678,20 @@ function ReaderView({
               )}
             </div>
           </div>
-          <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); next(); }} disabled={!canGoNextSingle}><ChevronRightIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); next(); }} disabled={!canGoNextSingle}><ChevronRightIcon size={20} /></button> : null}
         </div>
       )}
 
       {mode === 'double' && (
         <div className="reader-stage reader-stage-double" onClick={handleStageToggle}>
-          <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={currentSpreadIndex <= 0}><ChevronLeftIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={currentSpreadIndex <= 0}><ChevronLeftIcon size={20} /></button> : null}
           <div className="reader-double-wrap" tabIndex={0} onClick={handleStageToggle}>
             <MediaAsset
               key={`double-left-${chapter.id}-${currentSpread.start}-${mode}`}
               className="reader-page reader-page-double thumb-media"
               src={safePages[currentSpread.start]?.src}
               alt={`Page ${currentSpread.start + 1}`}
-              style={buildVisualMediaStyle({ maxWidth: `${480 * zoom}px` })}
+              style={buildVisualMediaStyle(getSpreadPageStyle())}
               mediaType={safePages[currentSpread.start]?.sourceType || 'image'}
               filePath={safePages[currentSpread.start]?.path}
               pageNumber={safePages[currentSpread.start]?.pdfPageNumber || currentSpread.start + 1}
@@ -1420,7 +1705,7 @@ function ReaderView({
                 className="reader-page reader-page-double thumb-media"
                 src={safePages[currentSpread.end]?.src}
                 alt={`Page ${currentSpread.end + 1}`}
-                style={buildVisualMediaStyle({ maxWidth: `${480 * zoom}px` })}
+                style={buildVisualMediaStyle(getSpreadPageStyle())}
                 mediaType={safePages[currentSpread.end]?.sourceType || 'image'}
                 filePath={safePages[currentSpread.end]?.path}
                 pageNumber={safePages[currentSpread.end]?.pdfPageNumber || currentSpread.end + 1}
@@ -1430,13 +1715,13 @@ function ReaderView({
               />
             )}
           </div>
-          <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); next(); }} disabled={currentSpreadIndex >= spreads.length - 1}><ChevronRightIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); next(); }} disabled={currentSpreadIndex >= spreads.length - 1}><ChevronRightIcon size={20} /></button> : null}
         </div>
       )}
 
       {mode === 'manga-jp' && (
         <div className="reader-stage reader-stage-double reader-stage-manga-jp" onClick={handleStageToggle}>
-          <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); next(); }} disabled={currentMangaJPSpreadIndex >= mangaJPSpreads.length - 1}><ChevronLeftIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-left" onClick={(event) => { event.stopPropagation(); next(); }} disabled={currentMangaJPSpreadIndex >= mangaJPSpreads.length - 1}><ChevronLeftIcon size={20} /></button> : null}
           <div className="reader-double-wrap reader-double-wrap-rtl" tabIndex={0} onClick={handleStageToggle}>
             {currentMangaJPSpread.isRTL && currentMangaJPSpread.end !== currentMangaJPSpread.start ? (
               <>
@@ -1445,7 +1730,7 @@ function ReaderView({
                   className="reader-page reader-page-double thumb-media"
                   src={safePages[currentMangaJPSpread.start]?.src}
                   alt={`Page ${currentMangaJPSpread.start + 1}`}
-                  style={buildVisualMediaStyle({ maxWidth: `${480 * zoom}px` })}
+                  style={buildVisualMediaStyle(getSpreadPageStyle())}
                   mediaType={safePages[currentMangaJPSpread.start]?.sourceType || 'image'}
                   filePath={safePages[currentMangaJPSpread.start]?.path}
                   pageNumber={safePages[currentMangaJPSpread.start]?.pdfPageNumber || currentMangaJPSpread.start + 1}
@@ -1458,7 +1743,7 @@ function ReaderView({
                   className="reader-page reader-page-double thumb-media"
                   src={safePages[currentMangaJPSpread.end]?.src}
                   alt={`Page ${currentMangaJPSpread.end + 1}`}
-                  style={buildVisualMediaStyle({ maxWidth: `${480 * zoom}px` })}
+                  style={buildVisualMediaStyle(getSpreadPageStyle())}
                   mediaType={safePages[currentMangaJPSpread.end]?.sourceType || 'image'}
                   filePath={safePages[currentMangaJPSpread.end]?.path}
                   pageNumber={safePages[currentMangaJPSpread.end]?.pdfPageNumber || currentMangaJPSpread.end + 1}
@@ -1473,7 +1758,7 @@ function ReaderView({
                 className="reader-page reader-page-double thumb-media"
                 src={safePages[currentMangaJPSpread.start]?.src}
                 alt={`Page ${currentMangaJPSpread.start + 1}`}
-                style={buildVisualMediaStyle({ maxWidth: `${480 * zoom}px` })}
+                style={buildVisualMediaStyle(getSpreadPageStyle())}
                 mediaType={safePages[currentMangaJPSpread.start]?.sourceType || 'image'}
                 filePath={safePages[currentMangaJPSpread.start]?.path}
                 pageNumber={safePages[currentMangaJPSpread.start]?.pdfPageNumber || currentMangaJPSpread.start + 1}
@@ -1483,7 +1768,7 @@ function ReaderView({
               />
             )}
           </div>
-          <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={currentMangaJPSpreadIndex <= 0}><ChevronRightIcon size={20} /></button>
+          {visualVariant !== 'horizon' ? <button className="reader-nav reader-nav-right" onClick={(event) => { event.stopPropagation(); previous(); }} disabled={currentMangaJPSpreadIndex <= 0}><ChevronRightIcon size={20} /></button> : null}
         </div>
       )}
 
@@ -1497,7 +1782,7 @@ function ReaderView({
               src={page.src}
               alt={`Page ${page.index + 1}`}
               loading="lazy"
-              style={buildVisualMediaStyle({ maxWidth: `${960 * zoom}px` })}
+              style={buildVisualMediaStyle(getWebtoonPageStyle())}
               mediaType={page.sourceType || 'image'}
               filePath={page.path}
               pageNumber={page.pdfPageNumber || page.index + 1}
@@ -1508,6 +1793,39 @@ function ReaderView({
           ))}
         </div>
       )}
+
+      {visualVariant === 'horizon' && mode !== 'webtoon' ? (
+        <>
+          <button
+            type="button"
+            className="reader-nav reader-nav-left"
+            aria-label="Page precedente"
+            onPointerDown={(event) => { event.stopPropagation(); (mode === 'manga-jp' ? next : previous)(); }}
+            onClick={(event) => { event.stopPropagation(); if (event.detail === 0) (mode === 'manga-jp' ? next : previous)(); }}
+            disabled={mode === 'single'
+              ? !canGoPreviousSingle
+              : mode === 'double'
+                ? currentSpreadIndex <= 0
+                : currentMangaJPSpreadIndex >= mangaJPSpreads.length - 1}
+          >
+            <ChevronLeftIcon size={20} />
+          </button>
+          <button
+            type="button"
+            className="reader-nav reader-nav-right"
+            aria-label="Page suivante"
+            onPointerDown={(event) => { event.stopPropagation(); (mode === 'manga-jp' ? previous : next)(); }}
+            onClick={(event) => { event.stopPropagation(); if (event.detail === 0) (mode === 'manga-jp' ? previous : next)(); }}
+            disabled={mode === 'single'
+              ? !canGoNextSingle
+              : mode === 'double'
+                ? currentSpreadIndex >= spreads.length - 1
+                : currentMangaJPSpreadIndex <= 0}
+          >
+            <ChevronRightIcon size={20} />
+          </button>
+        </>
+      ) : null}
 
       {showEndPanel && (
         <div className="reader-end-panel">

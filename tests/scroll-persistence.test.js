@@ -64,7 +64,7 @@ describe('persistent scroll positions', () => {
         }]
       }
     });
-    expect(v2.session).toMatchObject({ version: 4, scrollPositions: {} });
+    expect(v2.session).toMatchObject({ version: 8, scrollPositions: {} });
 
     let positions = {};
     for (let index = 0; index < 300; index += 1) {
@@ -112,7 +112,7 @@ describe('persistent scroll positions', () => {
 
     expect(second).toEqual(first);
     expect(second).toMatchObject({
-      version: 4,
+      version: 8,
       activeWorkspaceId: 'workspace-keep',
       workspaces: [{
         id: 'workspace-keep',
@@ -161,7 +161,7 @@ describe('persistent scroll positions', () => {
       }
     };
 
-    expect(normalizePersistedSessionPayload(payload)).toMatchObject(payload);
+    expect(normalizePersistedSessionPayload(payload)).toMatchObject({ ...payload, version: 8 });
   });
 
   it('keeps the anchor when navigation capture only refreshes the fallback offset', () => {
@@ -192,8 +192,8 @@ describe('persistent scroll positions', () => {
     expect(card).not.toContain('onMouseUp={handleMiddleUp}');
     expect(kavita).toContain('onAuxClick');
     expect(app).toMatch(/<LibraryView[\s\S]{0,500}scrollKey=\{activeScrollKey\}/);
-    expect(app).toContain('version: 4');
-    expect(app).toContain('[2, 3, 4].includes');
+    expect(app).toContain('version: 8');
+    expect(app).toContain('[2, 3, 4, 5, 6, 7, 8].includes');
     expect(app).toContain('scrollPositions: normalizeScrollPositions');
   });
 });

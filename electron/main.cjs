@@ -43,14 +43,24 @@ const {
   removeMangaFromCollection,
   clearDerivedArtifacts,
   getDerivedDbPath,
+  getCacheDir,
   getThumbnailDir,
   getManagedCoverDir,
   getUserDataPath,
   flushStateWrites,
   updateStateSegments
 } = require('./services/storage.cjs');
+const { createMetadataProviderRegistry } = require('./services/metadataProviders.cjs');
+const {
+  DEFAULT_MATCH_POLICY,
+  getWorkbenchPage,
+  getWorkbenchSelectionIds,
+  rankMetadataCandidates,
+  resolveSafeMetadataPatch
+} = require('./services/metadataWorkbench.cjs');
 const {
   activeCoverPath,
+  importManagedCover,
   mergeCoverVariants,
   normalizeCollectionAppearance,
   normalizeCoverProfile,
@@ -202,6 +212,13 @@ const {
   remapSourceLinks,
   stripPrivateIdentityState
 } = require('./services/identityWorks.cjs');
+const {
+  applyCategoryRelocation,
+  createCategoryRelocationPlan,
+  normalizePath: normalizeRelocationPath,
+  preserveUnavailableLibraryEntries,
+  undoCategoryRelocation
+} = require('./services/relocation.cjs');
 const { getOcrEngineInfo, listOcrLanguages, runOcrOnImage } = require('./services/ocrService.cjs');
 
 // Les profils fonctionnels et de benchmark doivent isoler aussi les caches Chromium,
@@ -310,8 +327,11 @@ let stateRevision = 1;
 let sourceRevision = 1;
 let sourceReconcileTimer = null;
 let sourceReconcilePromise = null;
+const relocationPlans = new Map();
 let quitFlushInProgress = false;
 let quitFlushComplete = false;
+let sessionFlushSequence = 0;
+const sessionFlushWaiters = new Map();
 const safeModeEnabled = process.argv.includes('--sawa-safe-mode');
 const safeModeSnapshot = safeModeEnabled ? readLastValidSnapshot(getUserDataPath()) : null;
 const mediaFailureLastReported = new Map();
@@ -334,7 +354,10 @@ function requestLibraryScan(persistedState = loadState()) {
       userDataPath: getUserDataPath(),
       skipUnchanged: Boolean(reusableSnapshot)
     })
-      .then((result) => (result?.unchanged ? reusableSnapshot : result))
+      .then((result) => {
+        const scanned = result?.unchanged ? reusableSnapshot : result;
+        return preserveUnavailableLibraryEntries(scanned, reusableSnapshot, persistedState);
+      })
       .finally(() => {
         libraryScanPromise = null;
       });
@@ -383,6 +406,30 @@ function updateSyncStatusPatch(patch = {}) {
       lastSuccess: latestSyncStatus.lastCompletedAt || null,
       error: latestSyncStatus.state === 'attention-needed' ? latestSyncStatus.detail : null
     }
+  });
+}
+
+function persistCategoryAvailability(library, persistedState) {
+  const scannedById = new Map((library?.categories || []).map((category) => [String(category.id), category]));
+  const needsUpdate = (persistedState?.categories || []).some((category) => {
+    const scanned = scannedById.get(String(category.id));
+    const next = scanned?.exists === false ? 'missing' : 'available';
+    return String(category.availability || 'available') !== next;
+  });
+  if (!needsUpdate) return persistedState;
+  const now = new Date().toISOString();
+  return updateState((state) => {
+    state.categories = (state.categories || []).map((category) => {
+      const scanned = scannedById.get(String(category.id));
+      const availability = scanned?.exists === false ? 'missing' : 'available';
+      return {
+        ...category,
+        availability,
+        lastSeenAt: availability === 'available' ? now : category.lastSeenAt,
+        missingSince: availability === 'missing' ? (category.missingSince || now) : null
+      };
+    });
+    return state;
   });
 }
 
@@ -487,13 +534,20 @@ async function runLibraryJob({ job, checkpoint, isCancelled }) {
   if (isCancelled()) return;
 
   const diskChanged = !areScanIndexesEquivalent(persistedBeforeScan.scanIndex, rawLibrary.scanIndex);
+  const scannedCategoryById = new Map((rawLibrary?.categories || []).map((category) => [String(category.id), category]));
+  const availabilityChanged = (persistedBeforeScan.categories || []).some((category) => {
+    const scanned = scannedCategoryById.get(String(category.id));
+    const nextAvailability = scanned?.exists === false ? 'missing' : 'available';
+    return String(category.availability || 'available') !== nextAvailability;
+  });
   checkpoint({
     diskChanged,
+    availabilityChanged,
     mangaCount: Number(rawLibrary?.allMangas?.length || 0)
   });
   rawLibrarySnapshot = rawLibrary;
   lastScanTime = Date.now();
-  if (!diskChanged) {
+  if (!diskChanged && !availabilityChanged) {
     updateSyncStatusPatch({
       lastCompletedKind: job.kind,
       lastCompletedAt: new Date().toISOString()
@@ -600,6 +654,183 @@ async function runArchiveExportJob({ job, checkpoint, isCancelled }) {
   });
 }
 
+async function resolveWorkbenchMangasById(mangaIds = []) {
+  const state = loadState();
+  const snapshot = rawLibrarySnapshot || readLibrarySnapshot() || await requestLibraryScan(state);
+  const library = applyPersistedOverlayToLibrary(snapshot || { allMangas: [] }, state);
+  const byId = new Map();
+  for (const manga of library?.allMangas || []) {
+    [manga.id, manga.contentId, manga.locationId].map((value) => String(value || '').trim()).filter(Boolean)
+      .forEach((id) => byId.set(id, manga));
+  }
+  return new Map((Array.isArray(mangaIds) ? mangaIds : []).map((value) => {
+    const id = String(value || '').trim();
+    return [id, byId.get(id) || null];
+  }));
+}
+
+function isPrivateWorkbenchManga(state, manga) {
+  const mangaId = String(manga?.id || '').trim();
+  const categoryId = String(manga?.categoryId || '').trim();
+  return (state?.vault?.privateMangaIds || []).map(String).includes(mangaId)
+    || (state?.vault?.privateCategoryIds || []).map(String).includes(categoryId);
+}
+
+function patchWorkbenchItem(mangaId, patch) {
+  const normalizedId = String(mangaId || '').trim();
+  let result = null;
+  updateStateSegments({ organization: ['metadataWorkbenchQueue', 'metadataWorkbenchItems'] }, (state) => {
+    state.metadataWorkbenchItems = Array.isArray(state.metadataWorkbenchItems) ? state.metadataWorkbenchItems : [];
+    const index = state.metadataWorkbenchItems.findIndex((item) => String(item?.mangaId || '') === normalizedId);
+    const previous = index >= 0
+      ? state.metadataWorkbenchItems[index]
+      : { mangaId: normalizedId, order: state.metadataWorkbenchItems.length, status: 'pending' };
+    result = { ...previous, ...patch, mangaId: normalizedId, updatedAt: new Date().toISOString() };
+    if (index >= 0) state.metadataWorkbenchItems[index] = result;
+    else state.metadataWorkbenchItems.push(result);
+    state.metadataWorkbenchQueue = state.metadataWorkbenchItems.map((item) => item.mangaId);
+    return state;
+  });
+  return result;
+}
+
+function applyWorkbenchCandidateToState(state, mangaId, candidate) {
+  const safe = resolveSafeMetadataPatch({
+    mangaId,
+    candidate,
+    metadata: state.metadata,
+    locks: state.metadataLocks,
+    fieldSources: state.metadataFieldSource
+  });
+  const before = {
+    metadata: structuredClone(state.metadata?.[mangaId] || {}),
+    fieldSources: structuredClone(state.metadataFieldSource?.[mangaId] || {})
+  };
+  for (const [field, value] of Object.entries(safe.patch)) {
+    applyMetadataField(state, mangaId, field, value, 'online');
+  }
+  state.metadata[mangaId] = {
+    ...(state.metadata[mangaId] || {}),
+    onlineImportedAt: new Date().toISOString()
+  };
+  return { ...safe, before };
+}
+
+async function analyzeWorkbenchItem({ mangaId, manga, jobId, autoApply }) {
+  const state = loadState();
+  if (!manga) {
+    return patchWorkbenchItem(mangaId, { status: 'error', error: 'Oeuvre locale introuvable.', jobId });
+  }
+  const privateContext = isPrivateWorkbenchManga(state, manga);
+  if (privateContext && state?.vault?.locked) {
+    return patchWorkbenchItem(mangaId, { status: 'error', error: 'Deverrouille le Coffre pour analyser cette oeuvre.', jobId });
+  }
+  patchWorkbenchItem(mangaId, { status: 'analyzing', error: null, decision: null, reviewedAt: null, jobId });
+  const ui = privateContext && state?.vault?.locked
+    ? {
+        ...state.ui,
+        metadataProviders: {
+          ...(state.ui?.metadataProviders || {}),
+          enabled: { ...(state.ui?.metadataProviders?.enabled || {}), imhentai: false, hentaiera: false }
+        }
+      }
+    : state.ui;
+  const response = await getMetadataProviderRegistry().searchCandidates(manga.displayTitle || manga.title, {
+    ui,
+    privateContext
+  });
+  const ranking = rankMetadataCandidates(manga, response.results, DEFAULT_MATCH_POLICY);
+  let appliedFields = [];
+  let undoEntry = null;
+  if (autoApply && ranking.safelyAutomatic && ranking.best) {
+    updateStateSegments({ metadata: ['metadata', 'metadataFieldSource'], organization: ['metadataWorkbenchLastBatch'] }, (nextState) => {
+      const applied = applyWorkbenchCandidateToState(nextState, mangaId, ranking.best);
+      appliedFields = applied.fields;
+      undoEntry = { mangaId, ...applied.before };
+      const previousEntries = Array.isArray(nextState.metadataWorkbenchLastBatch?.entries)
+        ? nextState.metadataWorkbenchLastBatch.entries.filter((entry) => entry.mangaId !== mangaId)
+        : [];
+      nextState.metadataWorkbenchLastBatch = {
+        id: jobId,
+        createdAt: new Date().toISOString(),
+        entries: [...previousEntries, undoEntry]
+      };
+      return nextState;
+    });
+  }
+  return patchWorkbenchItem(mangaId, {
+    status: autoApply && ranking.safelyAutomatic ? 'done' : ranking.status,
+    confidence: ranking.confidence,
+    margin: ranking.margin,
+    candidate: ranking.best ? { ...ranking.best, confidence: ranking.confidence, reasons: ranking.reasons } : null,
+    candidateCount: ranking.ranked.length,
+    fields: appliedFields,
+    decision: autoApply && ranking.safelyAutomatic ? 'accepted' : null,
+    reviewedAt: autoApply && ranking.safelyAutomatic ? new Date().toISOString() : null,
+    error: Object.keys(response.providerErrors || {}).length && !ranking.best
+      ? Object.values(response.providerErrors).join(' | ')
+      : null,
+    jobId
+  });
+}
+
+async function runWorkbenchAnalysisJob({ job, checkpoint, isCancelled }) {
+  const itemIds = [...new Set((job?.payload?.mangaIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  const mangas = await resolveWorkbenchMangasById(itemIds);
+  const autoApply = job?.payload?.autoApply !== false;
+  checkpoint({ phase: 'starting', completed: 0, total: itemIds.length, percent: 0 });
+  for (let index = 0; index < itemIds.length; index += 2) {
+    if (isCancelled()) throw new JobInterruptedError('Analyse Atelier annulee.');
+    const chunk = itemIds.slice(index, index + 2);
+    await Promise.all(chunk.map((mangaId) => analyzeWorkbenchItem({
+      mangaId,
+      manga: mangas.get(mangaId),
+      jobId: job.id,
+      autoApply
+    }).catch((error) => patchWorkbenchItem(mangaId, {
+      status: 'error',
+      error: error?.message || 'Analyse impossible.',
+      jobId: job.id
+    }))));
+    const completed = Math.min(itemIds.length, index + chunk.length);
+    checkpoint({ phase: 'analyzing', completed, total: itemIds.length, percent: itemIds.length ? Math.round((completed / itemIds.length) * 100) : 100 });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+async function runWorkbenchApplyJob({ job, checkpoint, isCancelled }) {
+  const itemIds = [...new Set((job?.payload?.mangaIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  checkpoint({ phase: 'starting', completed: 0, total: itemIds.length, percent: 0 });
+  for (let index = 0; index < itemIds.length; index += 1) {
+    if (isCancelled()) throw new JobInterruptedError('Import Atelier annule.');
+    const mangaId = itemIds[index];
+    const state = loadState();
+    const item = (state.metadataWorkbenchItems || []).find((entry) => entry.mangaId === mangaId);
+    const candidate = job?.payload?.candidates?.[mangaId]
+      || getMetadataProviderRegistry().getCandidate(item?.candidate?.identity)
+      || item?.candidate;
+    if (!candidate) {
+      patchWorkbenchItem(mangaId, { status: 'error', error: 'Candidat introuvable.', jobId: job.id });
+    } else {
+      updateStateSegments({ metadata: ['metadata', 'metadataFieldSource'], organization: ['metadataWorkbenchLastBatch'] }, (nextState) => {
+        const applied = applyWorkbenchCandidateToState(nextState, mangaId, candidate);
+        const previousEntries = Array.isArray(nextState.metadataWorkbenchLastBatch?.entries)
+          ? nextState.metadataWorkbenchLastBatch.entries.filter((entry) => entry.mangaId !== mangaId)
+          : [];
+        nextState.metadataWorkbenchLastBatch = {
+          id: job.id,
+          createdAt: new Date().toISOString(),
+          entries: [...previousEntries, { mangaId, ...applied.before }]
+        };
+        return nextState;
+      });
+      patchWorkbenchItem(mangaId, { status: 'done', decision: 'accepted', reviewedAt: new Date().toISOString(), error: null, jobId: job.id });
+    }
+    checkpoint({ phase: 'applying', completed: index + 1, total: itemIds.length, percent: itemIds.length ? Math.round(((index + 1) / itemIds.length) * 100) : 100 });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 const jobOrchestrator = new JobOrchestrator({
   profile: normalizeJobProfile(loadState()?.ui?.experimental?.schedulerProfile),
   handlers: {
@@ -607,6 +838,8 @@ const jobOrchestrator = new JobOrchestrator({
     analyze: runLibraryJob,
     'deep-scan': runLibraryJob,
     'source-import': runSourceImportJob,
+    'workbench-analysis': runWorkbenchAnalysisJob,
+    'workbench-apply': runWorkbenchApplyJob,
     export: runArchiveExportJob,
     'bulk-trash': runBulkTrashJob,
     ocr: runOcrJob,
@@ -931,7 +1164,7 @@ function registerLocalAssetProtocol() {
         return net.fetch(targetUrl.toString(), {
           headers: {
             Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'User-Agent': 'Sawa Manga Library/4.0.0',
+            'User-Agent': 'Sawa Manga Library/5.0.1',
             Referer: `${targetUrl.protocol}//${targetUrl.host}/`
           }
         });
@@ -1509,7 +1742,10 @@ function buildStatePayload(options = {}) {
   }
 
   const usesProvidedLibrary = Boolean(providedLibrary);
+  const previousLibrary = rawLibrarySnapshot || readLibrarySnapshot();
   let rawLibrary = providedLibrary || scanLibrary(persisted);
+  rawLibrary = preserveUnavailableLibraryEntries(rawLibrary, previousLibrary, persisted);
+  persisted = persistCategoryAvailability(rawLibrary, persisted);
   const livePaths = new Set((rawLibrary?.allMangas || [])
     .map((manga) => String(manga?.path || '').toLowerCase())
     .filter(Boolean));
@@ -2238,6 +2474,30 @@ function scheduleBootstrapRefreshScan() {
   }, 6000);
 }
 
+function requestRendererSessionFlush() {
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve(false);
+  sessionFlushSequence += 1;
+  const requestId = `session-flush-${Date.now()}-${sessionFlushSequence}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      sessionFlushWaiters.delete(requestId);
+      resolve(false);
+    }, 1200);
+    sessionFlushWaiters.set(requestId, (ok) => {
+      clearTimeout(timer);
+      sessionFlushWaiters.delete(requestId);
+      resolve(Boolean(ok));
+    });
+    try {
+      mainWindow.webContents.send('session:flushRequested', requestId);
+    } catch (_error) {
+      clearTimeout(timer);
+      sessionFlushWaiters.delete(requestId);
+      resolve(false);
+    }
+  });
+}
+
 app.whenReady().then(() => {
   registerLocalAssetProtocol();
   createWindow();
@@ -2261,19 +2521,23 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitFlushInProgress) return;
   quitFlushInProgress = true;
-  persistVaultLock();
-  terminateSourceRuntimeProcesses();
-  const snapshot = loadState();
-  try { writeLastValidSnapshot(getUserDataPath(), snapshot); } catch (_error) {}
-  Promise.all([
-    flushWithDeadline({
-      timeoutMs: 2000,
-      flushState: flushStateWrites,
-      flushSources: flushSourcesStateWrites
-    }),
-    shutdownHeavyIoWorkers({ timeoutMs: 750 }),
-    thumbnailUtilityPool?.shutdown() || Promise.resolve()
-  ]).then(([result]) => {
+  requestRendererSessionFlush().catch(() => false).then(() => {
+    persistVaultLock();
+    metadataProviderRegistry?.clearPrivateCache();
+    terminateSourceRuntimeProcesses();
+    const snapshot = loadState();
+    try { writeLastValidSnapshot(getUserDataPath(), snapshot); } catch (_error) {}
+    return Promise.all([
+      flushWithDeadline({
+        timeoutMs: 2000,
+        flushState: flushStateWrites,
+        flushSources: flushSourcesStateWrites
+      }),
+      shutdownHeavyIoWorkers({ timeoutMs: 750 }),
+      thumbnailUtilityPool?.shutdown() || Promise.resolve(),
+      metadataProviderRegistry?.flush() || Promise.resolve()
+    ]);
+  }).then(([result]) => {
     if (result.ok) clearShutdownMarker(getUserDataPath());
     else writeShutdownMarker(getUserDataPath(), result);
   }).catch((error) => {
@@ -2305,10 +2569,7 @@ function persistReadingProgress(payload) {
     reader: ['progress', 'chapterReadStatus', 'recents'],
     root: ['ui']
   }, (state) => {
-    const { mangaId, chapterId, pageIndex, pageCount, mode, fitMode, zoom, scrollTop, scrollRatio } = payload;
-    const now = new Date().toISOString();
-
-    state.progress[chapterId] = {
+    const {
       mangaId,
       chapterId,
       pageIndex,
@@ -2318,17 +2579,39 @@ function persistReadingProgress(payload) {
       zoom,
       scrollTop,
       scrollRatio,
+      anchorPageIndex,
+      intraPageOffset
+    } = payload;
+    const now = new Date().toISOString();
+    const previous = state.progress?.[chapterId] || {};
+    const furthestPageIndex = Math.max(
+      Number(previous.furthestPageIndex ?? previous.pageIndex) || 0,
+      Number(payload.furthestPageIndex ?? pageIndex) || 0
+    );
+
+    state.progress[chapterId] = {
+      ...previous,
+      mangaId,
+      chapterId,
+      pageIndex,
+      furthestPageIndex,
+      pageCount,
+      mode,
+      fitMode,
+      zoom,
+      scrollTop,
+      scrollRatio,
+      anchorPageIndex: Number.isFinite(Number(anchorPageIndex)) ? Math.max(0, Math.floor(Number(anchorPageIndex))) : Math.max(0, Number(pageIndex) || 0),
+      intraPageOffset: Number.isFinite(Number(intraPageOffset)) ? Math.max(0, Number(intraPageOffset)) : 0,
       lastReadAt: now
     };
 
     // Auto-mark chapter as read based on threshold from UI settings
     const threshold = state.ui?.autoMarkReadThreshold ?? 95;
     if (typeof pageCount === 'number' && typeof pageIndex === 'number' && pageCount > 0) {
-      const percent = ((pageIndex + 1) / pageCount) * 100;
+      const percent = ((furthestPageIndex + 1) / pageCount) * 100;
       if (percent >= threshold) {
         state.chapterReadStatus[chapterId] = true;
-      } else {
-        delete state.chapterReadStatus[chapterId];
       }
     }
 
@@ -2489,12 +2772,29 @@ function reconcilePersistedStateWithLibrary(persisted, rawLibrary) {
     return { changed: false, persisted };
   }
 
-  const previousByContentId = new Map(previousEntries.filter((entry) => entry?.contentId).map((entry) => [entry.contentId, entry]));
+  const previousByContentId = new Map();
+  for (const entry of previousEntries) {
+    if (!entry?.contentId) continue;
+    const matches = previousByContentId.get(entry.contentId) || [];
+    matches.push(entry);
+    previousByContentId.set(entry.contentId, matches);
+  }
+  const pathTail = (entry) => {
+    const normalized = path.normalize(String(entry?.path || ''));
+    const parts = normalized.split(path.sep).filter(Boolean);
+    const depth = entry?.type === 'chapter' ? 2 : 1;
+    return parts.slice(-depth).join(path.sep).toLowerCase();
+  };
   const mangaIdMap = new Map();
   const chapterIdMap = new Map();
 
   for (const entry of nextEntries) {
-    const previous = previousByContentId.get(entry?.contentId);
+    const candidates = (previousByContentId.get(entry?.contentId) || [])
+      .filter((candidate) => candidate?.type === entry?.type);
+    const structuralMatches = candidates.length > 1
+      ? candidates.filter((candidate) => pathTail(candidate) === pathTail(entry))
+      : candidates;
+    const previous = structuralMatches.length === 1 ? structuralMatches[0] : null;
     if (!previous || !previous.legacyId || !entry?.legacyId || previous.legacyId === entry.legacyId) continue;
     if (entry.type === 'manga') mangaIdMap.set(previous.legacyId, entry.legacyId);
     if (entry.type === 'chapter') chapterIdMap.set(previous.legacyId, entry.legacyId);
@@ -2525,6 +2825,16 @@ function reconcilePersistedStateWithLibrary(persisted, rawLibrary) {
         mangaId: remapValue(entry.mangaId, fromId, toId)
       }));
       state.metadataWorkbenchQueue = (state.metadataWorkbenchQueue || []).map((value) => remapValue(value, fromId, toId));
+      state.metadataWorkbenchItems = (state.metadataWorkbenchItems || []).map((item) => ({
+        ...item,
+        mangaId: remapValue(item?.mangaId, fromId, toId)
+      }));
+      if (Array.isArray(state.metadataWorkbenchLastBatch?.entries)) {
+        state.metadataWorkbenchLastBatch.entries = state.metadataWorkbenchLastBatch.entries.map((entry) => ({
+          ...entry,
+          mangaId: remapValue(entry?.mangaId, fromId, toId)
+        }));
+      }
       state.vault.privateMangaIds = (state.vault?.privateMangaIds || []).map((value) => remapValue(value, fromId, toId));
       state.readingQueue = (state.readingQueue || []).map((item) => ({
         ...item,
@@ -2592,6 +2902,12 @@ function reconcilePersistedStateWithLibrary(persisted, rawLibrary) {
 ipcMain.on('app:boot-ready', () => {
   ensureMainWindowVisible();
   closeSplashWindow();
+});
+
+ipcMain.on('session:flushComplete', (_event, payload) => {
+  const requestId = typeof payload === 'string' ? payload : payload?.requestId;
+  const waiter = sessionFlushWaiters.get(String(requestId || ''));
+  waiter?.(typeof payload === 'string' ? true : payload?.ok !== false);
 });
 
 ipcMain.on('app:mark-interaction', () => {
@@ -2995,7 +3311,11 @@ ipcMain.handle('library:addCategories', async () => {
         id: makeId('category', folderPath),
         path: folderPath,
         name: path.basename(folderPath),
-        hidden: false
+        hidden: false,
+        pathHistory: [folderPath],
+        availability: 'available',
+        lastSeenAt: new Date().toISOString(),
+        missingSince: null
       });
     }
     return state;
@@ -3020,6 +3340,127 @@ ipcMain.handle('library:removeCategory', async (_event, categoryId) => {
   });
   restartWatchers();
   return buildPayloadAfterStructuralScan();
+});
+
+ipcMain.handle('library:listUnavailableLocations', async () => {
+  const state = loadState();
+  return {
+    ok: true,
+    revision: stateRevision,
+    categories: (state.categories || [])
+      .filter((category) => category.availability === 'missing' || !fs.existsSync(category.path))
+      .map((category) => ({
+        id: category.id,
+        name: category.name,
+        path: category.path,
+        pathHistory: category.pathHistory || [],
+        availability: 'missing',
+        missingSince: category.missingSince || null
+      }))
+  };
+});
+
+ipcMain.handle('library:pickRelocationTarget', async (_event, categoryId) => {
+  const category = (loadState().categories || []).find((entry) => String(entry.id) === String(categoryId));
+  if (!category) return { ok: false, revision: stateRevision, error: 'Categorie introuvable.' };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `Retrouver ${category.name}`,
+    defaultPath: path.dirname(category.path),
+    properties: ['openDirectory']
+  });
+  if (result.canceled || !result.filePaths?.[0]) return { ok: true, revision: stateRevision, canceled: true };
+  return { ok: true, revision: stateRevision, categoryId: category.id, path: result.filePaths[0] };
+});
+
+ipcMain.handle('library:inspectRelocation', async (_event, input = {}) => {
+  try {
+    const categoryId = String(input.categoryId || '');
+    const targetPath = path.resolve(String(input.targetPath || ''));
+    const state = loadState();
+    const category = (state.categories || []).find((entry) => String(entry.id) === categoryId);
+    if (!category) throw new Error('Categorie introuvable.');
+    const targetStat = await fs.promises.stat(targetPath);
+    if (!targetStat.isDirectory()) throw new Error('Le nouvel emplacement n est pas un dossier.');
+    const duplicate = (state.categories || []).find((entry) => entry.id !== category.id && normalizeRelocationPath(entry.path) === normalizeRelocationPath(targetPath));
+    if (duplicate) throw new Error(`Ce dossier est deja suivi par la categorie ${duplicate.name}.`);
+
+    const previousLibrary = rawLibrarySnapshot || readLibrarySnapshot();
+    const previousCategory = (previousLibrary?.categories || []).find((entry) => String(entry.id) === categoryId);
+    if (!previousCategory) throw new Error('Le dernier snapshot de cette categorie est introuvable.');
+    const inspectionState = {
+      ...state,
+      categories: [{ ...category, path: targetPath, availability: 'available' }]
+    };
+    const inspectedLibrary = await scanLibraryInWorker(inspectionState, {
+      userDataPath: getUserDataPath(),
+      skipUnchanged: false
+    });
+    const nextCategory = (inspectedLibrary?.categories || []).find((entry) => String(entry.id) === categoryId);
+    const publicPlan = createCategoryRelocationPlan({
+      category,
+      previousCategory,
+      nextCategory,
+      targetPath,
+      stateRevision
+    });
+    const plan = { ...publicPlan, nextScanIndex: inspectedLibrary.scanIndex, nextLibrary: inspectedLibrary };
+    relocationPlans.set(plan.id, plan);
+    return { ok: true, revision: stateRevision, plan: publicPlan };
+  } catch (error) {
+    return { ok: false, revision: stateRevision, error: error?.message || 'Analyse du nouvel emplacement impossible.' };
+  }
+});
+
+ipcMain.handle('library:applyRelocation', async (_event, planId) => {
+  try {
+    const plan = relocationPlans.get(String(planId || ''));
+    if (!plan) throw new Error('Le plan de rattachement a expire. Relancez la verification.');
+    if (!plan.autoApplicable) throw new Error('Cette correspondance doit etre validee manuellement dans Entretien.');
+    let journalEntry = null;
+    updateState((state) => {
+      journalEntry = applyCategoryRelocation(state, plan);
+      return state;
+    });
+    if (journalEntry?.mangaMoves?.length) {
+      updateSourcesState((draft) => {
+        draft.seriesLinks = remapSourceLinks(draft.seriesLinks, journalEntry.mangaMoves);
+        return draft;
+      });
+    }
+    rawLibrarySnapshot = plan.nextLibrary || null;
+    relocationPlans.delete(plan.id);
+    restartWatchers();
+    const payload = await buildPayloadAfterStructuralScan();
+    return { ok: true, revision: stateRevision, payload, relocation: journalEntry };
+  } catch (error) {
+    return { ok: false, revision: stateRevision, error: error?.message || 'Rattachement impossible.' };
+  }
+});
+
+ipcMain.handle('library:undoRelocation', async (_event, relocationId) => {
+  try {
+    let journalEntry = null;
+    updateState((state) => {
+      journalEntry = undoCategoryRelocation(state, String(relocationId || ''));
+      return state;
+    });
+    if (journalEntry?.mangaMoves?.length) {
+      const inverseMoves = journalEntry.mangaMoves.map((move) => ({
+        fromMangaId: move.toMangaId,
+        toMangaId: move.fromMangaId
+      }));
+      updateSourcesState((draft) => {
+        draft.seriesLinks = remapSourceLinks(draft.seriesLinks, inverseMoves);
+        return draft;
+      });
+    }
+    rawLibrarySnapshot = null;
+    restartWatchers();
+    const payload = await buildPayloadAfterStructuralScan();
+    return { ok: true, revision: stateRevision, payload, relocation: journalEntry };
+  } catch (error) {
+    return { ok: false, revision: stateRevision, error: error?.message || 'Annulation du rattachement impossible.' };
+  }
 });
 
 async function performTrashScannedMangas(mangaIds, {
@@ -4589,48 +5030,116 @@ async function searchNHentai(query) {
   return [];
 }
 
-async function remoteImageToDataUrl(url) {
-  if (!url) return null;
-  try {
-    const response = await net.fetch(url, {
-      headers: buildRemoteHeaders(url, {
-        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-      })
-    });
-    if (!response.ok) return null;
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
-    const buffer = Buffer.from(await response.arrayBuffer());
-    return `data:${contentType};base64,${buffer.toString('base64')}`;
-  } catch (_error) {
-    return null;
-  }
+let metadataProviderRegistry = null;
+
+function getMetadataProviderRegistry() {
+  if (metadataProviderRegistry) return metadataProviderRegistry;
+  metadataProviderRegistry = createMetadataProviderRegistry({
+    fetchImpl: (url, options) => net.fetch(url, options),
+    cachePath: path.join(getCacheDir(), 'metadata-candidates-v1.json'),
+    legacyProviders: {
+      mangadex: (query) => searchMangaDex(query),
+      anilist: (query) => searchAniList(query),
+      nhentai: (query) => searchNHentai(query)
+    }
+  });
+  return metadataProviderRegistry;
 }
+
+async function downloadCandidateCover(identity) {
+  const normalizedIdentity = String(identity || '').trim();
+  let candidate = getMetadataProviderRegistry().getCandidate(normalizedIdentity);
+  if (!candidate) {
+    const state = loadState();
+    const storedItem = (state.metadataWorkbenchItems || []).find((item) =>
+      String(item?.candidate?.identity || '') === normalizedIdentity
+    );
+    const privateCandidateLocked = storedItem
+      && state?.vault?.locked
+      && isPrivateWorkbenchManga(state, storedItem.mangaId);
+    if (!privateCandidateLocked) candidate = storedItem?.candidate || null;
+  }
+  const url = candidate?.coverPreviewUrl || candidate?.coverUrl || candidate?.coverDownloadUrl;
+  if (!url) return { ok: false, error: 'Couverture indisponible.' };
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (_error) {
+    return { ok: false, error: 'URL de couverture invalide.' };
+  }
+  if (!['https:', 'http:'].includes(parsed.protocol)) return { ok: false, error: 'Protocole de couverture refuse.' };
+  const response = await net.fetch(parsed.toString(), {
+    headers: buildRemoteHeaders(parsed.toString(), { Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif' })
+  });
+  if (!response.ok) return { ok: false, error: `Couverture HTTP ${response.status}` };
+  const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!contentType.startsWith('image/') || contentType === 'image/svg+xml') {
+    return { ok: false, error: 'Le serveur n a pas retourne une image acceptee.' };
+  }
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  const maxBytes = 15 * 1024 * 1024;
+  if (declaredLength > maxBytes) return { ok: false, error: 'Couverture superieure a 15 Mio.' };
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length || buffer.length > maxBytes) return { ok: false, error: 'Couverture vide ou superieure a 15 Mio.' };
+  const image = nativeImage.createFromBuffer(buffer);
+  const size = image.getSize();
+  if (image.isEmpty() || size.width < 1 || size.height < 1) return { ok: false, error: 'Couverture illisible.' };
+  return {
+    ok: true,
+    identity: candidate.identity,
+    buffer,
+    contentType,
+    width: size.width,
+    height: size.height,
+    bytes: buffer.length
+  };
+}
+
+async function loadCandidateCoverData(identity) {
+  const result = await downloadCandidateCover(identity);
+  if (!result.ok) return result;
+  return {
+    ...result,
+    buffer: undefined,
+    dataUrl: `data:${result.contentType};base64,${result.buffer.toString('base64')}`
+  };
+}
+
+ipcMain.handle('metadata:listProviders', () => {
+  const state = loadState();
+  return getMetadataProviderRegistry().listProviders(state.ui)
+    .filter((provider) => !(state?.vault?.locked && provider.family === 'imhentai-family'));
+});
+
+ipcMain.handle('metadata:getCandidateCover', async (_event, identity) => loadCandidateCoverData(identity));
+
+ipcMain.handle('metadata:hydrateCandidate', async (_event, candidate, input = {}) => {
+  const state = loadState();
+  if (!state?.ui?.allowNsfwSources) return { ok: false, error: 'Sources adultes desactivees.' };
+  const settings = getMetadataProviderRegistry().normalizeProviderSettings(state.ui);
+  try {
+    const result = await getMetadataProviderRegistry().hydrateCandidate(candidate, { settings, privateContext: Boolean(input.privateContext) });
+    return { ok: true, candidate: result };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Hydratation impossible.' };
+  }
+});
 
 ipcMain.handle('metadata:searchOnline', async (_event, query) => {
   if (!query || !query.trim()) return { results: [] };
   const trimmedQuery = query.trim();
   const state = loadState();
-  const allowNsfwSources = Boolean(state?.ui?.allowNsfwSources);
-  const providers = [
-    ['mangadex', () => searchMangaDex(trimmedQuery)],
-    ['anilist', () => searchAniList(trimmedQuery)],
-    ...(allowNsfwSources ? [['nhentai', () => searchNHentai(trimmedQuery)]] : [])
-  ];
-  const providerErrors = {};
-  const settled = await Promise.allSettled(providers.map(([, run]) => run()));
-
-  const merged = [];
-  for (let index = 0; index < settled.length; index += 1) {
-    const result = settled[index];
-    const key = providers[index]?.[0] || `provider-${index}`;
-    if (result.status === 'fulfilled') {
-      merged.push(...(result.value || []));
-    } else {
-      providerErrors[key] = result.reason?.message || 'Erreur réseau';
-    }
-  }
-
-  const ranked = merged
+  const ui = state?.vault?.locked
+    ? {
+        ...state.ui,
+        metadataProviders: {
+          ...(state.ui?.metadataProviders || {}),
+          enabled: { ...(state.ui?.metadataProviders?.enabled || {}), imhentai: false, hentaiera: false }
+        }
+      }
+    : state.ui;
+  const response = await getMetadataProviderRegistry().searchCandidates(trimmedQuery, { ui });
+  const ranked = response.results
     .map((item) => ({ ...item, _relevance: computeResultRelevance(item, trimmedQuery) }))
     .sort((a, b) => {
       if (b._relevance !== a._relevance) return b._relevance - a._relevance;
@@ -4640,16 +5149,12 @@ ipcMain.handle('metadata:searchOnline', async (_event, query) => {
     .slice(0, 20)
     .map(({ _relevance, ...item }) => item);
 
-  const results = await Promise.all(ranked.map(async (item) => ({
-    ...item,
-    coverPreviewSrc: await remoteImageToDataUrl(item.coverPreviewUrl || item.coverUrl || item.coverDownloadUrl)
-  })));
-
-  const errorKeys = Object.keys(providerErrors);
+  const errorKeys = Object.keys(response.providerErrors);
   return {
-    results,
-    error: errorKeys.length ? errorKeys.map((key) => `${key}: ${providerErrors[key]}`).join(' | ') : null,
-    providerErrors
+    results: ranked,
+    error: errorKeys.length ? errorKeys.map((key) => `${key}: ${response.providerErrors[key]}`).join(' | ') : null,
+    providerErrors: response.providerErrors,
+    cached: Boolean(response.cached)
   };
 });
 
@@ -4678,29 +5183,25 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
     patch.malId = Number(onlineData.malId);
   }
 
-  if (onlineData.coverDownloadUrl || onlineData.coverUrl) {
+  let managedCoverVariant = null;
+  if (onlineData.identity && (onlineData.coverDownloadUrl || onlineData.coverUrl)) {
+    let tempPath = null;
     try {
-      const currentPayload = await buildInteractivePayloadAsync({ refreshDerived: false });
-      const manga = findMangaByReference(currentPayload.library, mangaId)
-        || findMangaByReference(currentPayload.vaultLibrary, mangaId);
-      if (manga?.path && fs.existsSync(manga.path)) {
-        const remoteUrl = onlineData.coverDownloadUrl || onlineData.coverUrl;
-        const response = await net.fetch(remoteUrl, { headers: buildRemoteHeaders(remoteUrl) });
-        if (response.ok) {
-          const buffer = Buffer.from(await response.arrayBuffer());
-          const contentType = response.headers.get('content-type') || '';
-          const urlPath = (() => {
-            try { return new URL(remoteUrl).pathname; } catch (_) { return remoteUrl; }
-          })();
-          const extFromUrl = (path.extname(urlPath) || '').toLowerCase();
-          const ext = extFromUrl || inferImageExtensionFromContentType(contentType);
-          const coverPath = path.join(manga.path, `.sawa-online-cover${ext || '.jpg'}`);
-          fs.writeFileSync(coverPath, buffer);
-          patch.onlineCoverPath = coverPath;
-        }
+      const downloaded = await downloadCandidateCover(onlineData.identity);
+      if (downloaded.ok) {
+        const extension = inferImageExtensionFromContentType(downloaded.contentType) || '.jpg';
+        tempPath = path.join(getCacheDir(), `.metadata-cover-${process.pid}-${Date.now()}${extension}`);
+        await fs.promises.writeFile(tempPath, downloaded.buffer);
+        managedCoverVariant = await importManagedCover({
+          sourcePath: tempPath,
+          managedCoverDir: getManagedCoverDir(),
+          sourceLabel: `${onlineData.sourceLabel || onlineData.source || 'Source en ligne'} - ${onlineData.title || 'couverture'}`
+        });
       }
-    } catch (_) {
-      // Cover download failed silently
+    } catch (_error) {
+      managedCoverVariant = null;
+    } finally {
+      if (tempPath) await fs.promises.rm(tempPath, { force: true }).catch(() => {});
     }
   }
 
@@ -4709,7 +5210,7 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
     '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6',
     '#6366f1', '#f43f5e', '#0ea5e9', '#84cc16'
   ];
-  const isNhentai = onlineData.source === 'nhentai';
+  const isAdultMetadataSource = ['nhentai', 'imhentai', 'hentaiera'].includes(onlineData.source);
   const now = new Date().toISOString();
 
   updateState((state) => {
@@ -4719,6 +5220,7 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
     state.tags = state.tags || {};
     state.mangaTags = state.mangaTags || {};
     state.mangaTagMeta = state.mangaTagMeta || {};
+    state.coverProfiles = state.coverProfiles || {};
 
     for (const [field, value] of Object.entries(patch)) {
       applyMetadataField(state, mangaId, field, value, 'online');
@@ -4727,6 +5229,10 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
       ...(state.metadata[mangaId] || {}),
       onlineImportedAt: now
     };
+    if (managedCoverVariant) {
+      const profile = mergeCoverVariants(normalizeCoverProfile(state.coverProfiles[mangaId], mangaId), [managedCoverVariant]);
+      state.coverProfiles[mangaId] = selectCoverVariant(profile, managedCoverVariant.id);
+    }
 
     for (const tag of importedGenres) {
       const tagName = tag.trim();
@@ -4745,9 +5251,9 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
       }
       if (existingTag) {
         state.mangaTags[mangaId] = [...new Set([...(state.mangaTags[mangaId] || []), existingTag.id])];
-        if (isNhentai) {
+        if (isAdultMetadataSource) {
           state.mangaTagMeta[mangaId] = state.mangaTagMeta[mangaId] || {};
-          state.mangaTagMeta[mangaId][existingTag.id] = { nsfw: true, source: 'nhentai', autoImported: true, markedAt: now };
+          state.mangaTagMeta[mangaId][existingTag.id] = { nsfw: true, source: onlineData.source, autoImported: true, markedAt: now };
         }
       }
     }
@@ -4760,23 +5266,186 @@ ipcMain.handle('metadata:importOnline', async (_event, mangaId, onlineData) => {
 
 ipcMain.handle('metadata:queueWorkbench', async (_event, mangaIds = [], mode = 'append') => {
   const ids = [...new Set((Array.isArray(mangaIds) ? mangaIds : []).map((value) => String(value || '').trim()).filter(Boolean))];
-  updateState((state) => {
+  let nextItems = [];
+  updateStateSegments({ organization: ['metadataWorkbenchQueue', 'metadataWorkbenchItems'] }, (state) => {
     const existing = Array.isArray(state.metadataWorkbenchQueue) ? state.metadataWorkbenchQueue : [];
     state.metadataWorkbenchQueue = mode === 'replace'
       ? ids
       : [...new Set([...existing, ...ids])];
+    const existingItems = new Map((state.metadataWorkbenchItems || []).map((item) => [String(item.mangaId), item]));
+    state.metadataWorkbenchItems = state.metadataWorkbenchQueue.map((mangaId, order) => ({
+      ...(existingItems.get(mangaId) || { mangaId, status: 'pending', confidence: 0, margin: 0, candidate: null, candidateCount: 0, fields: [], error: null, jobId: null }),
+      mangaId,
+      order
+    }));
+    nextItems = structuredClone(state.metadataWorkbenchItems);
     return state;
   });
-  return buildInteractivePayload();
+  return mutationResult({ metadataWorkbenchQueue: nextItems.map((item) => item.mangaId), metadataWorkbenchItems: nextItems });
 });
 
 ipcMain.handle('metadata:setWorkbenchQueue', async (_event, mangaIds = []) => {
   const ids = [...new Set((Array.isArray(mangaIds) ? mangaIds : []).map((value) => String(value || '').trim()).filter(Boolean))];
-  updateState((state) => {
+  let nextItems = [];
+  updateStateSegments({ organization: ['metadataWorkbenchQueue', 'metadataWorkbenchItems'] }, (state) => {
+    const existingItems = new Map((state.metadataWorkbenchItems || []).map((item) => [String(item.mangaId), item]));
     state.metadataWorkbenchQueue = ids;
+    state.metadataWorkbenchItems = ids.map((mangaId, order) => ({
+      ...(existingItems.get(mangaId) || { mangaId, status: 'pending', confidence: 0, margin: 0, candidate: null, candidateCount: 0, fields: [], error: null, jobId: null }),
+      mangaId,
+      order
+    }));
+    nextItems = structuredClone(state.metadataWorkbenchItems);
     return state;
   });
-  return buildInteractivePayload();
+  return mutationResult({ metadataWorkbenchQueue: ids, metadataWorkbenchItems: nextItems });
+});
+
+ipcMain.handle('metadata:getWorkbenchPage', async (_event, input = {}) => {
+  const state = loadState();
+  let items = Array.isArray(state.metadataWorkbenchItems) ? state.metadataWorkbenchItems : [];
+  const mangaMap = await resolveWorkbenchMangasById(items.map((item) => item.mangaId));
+  if (state?.vault?.locked) {
+    items = items.filter((item) => !isPrivateWorkbenchManga(state, mangaMap.get(item.mangaId)));
+  }
+  const page = getWorkbenchPage(items, input);
+  return {
+    ...page,
+    items: page.items.map((item) => {
+      const manga = mangaMap.get(item.mangaId);
+      return {
+        ...item,
+        manga: manga ? {
+          id: String(manga.id || item.mangaId),
+          displayTitle: manga.displayTitle || manga.title || 'Sans titre',
+          author: manga.author || manga.onlineAuthor || '',
+          chapterCount: Number(manga.chapterCount || manga.chapters?.length || 0),
+          pageCount: Number(manga.pageCount || manga.totalPages || 0),
+          coverSrc: manga.coverSrc || null,
+          coverMediaType: manga.coverMediaType || 'image',
+          coverFilePath: manga.coverFilePath || null,
+          coverPageNumber: Number(manga.coverPageNumber || 1),
+          isPrivate: isPrivateWorkbenchManga(state, manga)
+        } : null
+      };
+    })
+  };
+});
+
+ipcMain.handle('metadata:getWorkbenchSelectionIds', async (_event, input = {}) => {
+  const state = loadState();
+  let items = Array.isArray(state.metadataWorkbenchItems) ? state.metadataWorkbenchItems : [];
+  if (state?.vault?.locked) {
+    const mangaMap = await resolveWorkbenchMangasById(items.map((item) => item.mangaId));
+    items = items.filter((item) => !isPrivateWorkbenchManga(state, mangaMap.get(item.mangaId)));
+  }
+  const ids = getWorkbenchSelectionIds(items, input);
+  return { ok: true, revision: stateRevision, ids, total: ids.length };
+});
+
+ipcMain.handle('metadata:searchCandidates', async (_event, input = {}) => {
+  const mangaId = String(input.mangaId || '').trim();
+  const state = loadState();
+  const manga = mangaId ? (await resolveWorkbenchMangasById([mangaId])).get(mangaId) : null;
+  const privateContext = Boolean(manga && isPrivateWorkbenchManga(state, manga));
+  if (privateContext && state?.vault?.locked) return { ok: false, error: 'Coffre verrouille.', results: [] };
+  const query = String(input.query || manga?.displayTitle || '').trim();
+  const response = await getMetadataProviderRegistry().searchCandidates(query, { ui: state.ui, privateContext });
+  const ranking = manga ? rankMetadataCandidates(manga, response.results, DEFAULT_MATCH_POLICY) : null;
+  return {
+    ok: true,
+    results: ranking ? ranking.ranked.map((entry) => ({ ...entry.candidate, confidence: entry.confidence, reasons: entry.reasons })) : response.results,
+    providerErrors: response.providerErrors,
+    cached: Boolean(response.cached)
+  };
+});
+
+ipcMain.handle('metadata:startWorkbenchAnalysis', (_event, input = {}) => {
+  const state = loadState();
+  const requested = [...new Set((input.mangaIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  const mangaIds = requested.length
+    ? requested
+    : (state.metadataWorkbenchItems || []).filter((item) => ['pending', 'interrupted', 'error'].includes(item.status)).map((item) => item.mangaId);
+  const job = jobOrchestrator.enqueue({
+    kind: 'workbench-analysis',
+    payload: { mangaIds, autoApply: input.autoApply !== false },
+    requeueable: true,
+    progress: { phase: 'queued', completed: 0, total: mangaIds.length, percent: 0 }
+  });
+  return { ok: true, revision: stateRevision, job };
+});
+
+ipcMain.handle('metadata:applyWorkbenchMatches', (_event, input = {}) => {
+  const mangaIds = [...new Set((input.mangaIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  const job = jobOrchestrator.enqueue({
+    kind: 'workbench-apply',
+    payload: { mangaIds, candidates: input.candidates && typeof input.candidates === 'object' ? input.candidates : {} },
+    requeueable: false,
+    progress: { phase: 'queued', completed: 0, total: mangaIds.length, percent: 0 }
+  });
+  return { ok: true, revision: stateRevision, job };
+});
+
+ipcMain.handle('metadata:resolveWorkbenchItems', async (_event, input = {}) => {
+  const decision = String(input?.decision || '').trim();
+  if (!['keep-local'].includes(decision)) {
+    return { ok: false, revision: stateRevision, error: 'Decision Atelier invalide.' };
+  }
+  const requestedIds = [...new Set((input?.mangaIds || []).map((value) => String(value || '').trim()).filter(Boolean))];
+  if (!requestedIds.length) return { ok: false, revision: stateRevision, error: 'Aucune oeuvre selectionnee.' };
+  const state = loadState();
+  const mangaMap = await resolveWorkbenchMangasById(requestedIds);
+  const allowedIds = requestedIds.filter((mangaId) => !(state?.vault?.locked && isPrivateWorkbenchManga(state, mangaMap.get(mangaId))));
+  const reviewedAt = new Date().toISOString();
+  updateStateSegments({ organization: ['metadataWorkbenchQueue', 'metadataWorkbenchItems'] }, (nextState) => {
+    const allowed = new Set(allowedIds);
+    nextState.metadataWorkbenchItems = (nextState.metadataWorkbenchItems || []).map((item) => allowed.has(String(item?.mangaId || ''))
+      ? { ...item, status: 'done', decision, reviewedAt, error: null, jobId: null, updatedAt: reviewedAt }
+      : item);
+    nextState.metadataWorkbenchQueue = (nextState.metadataWorkbenchItems || []).map((item) => item.mangaId);
+    return nextState;
+  });
+  return mutationResult({ resolvedIds: allowedIds, rejectedIds: requestedIds.filter((id) => !allowedIds.includes(id)) });
+});
+
+ipcMain.handle('metadata:retryWorkbenchItems', (_event, mangaIds = []) => {
+  const ids = [...new Set((Array.isArray(mangaIds) ? mangaIds : []).map((value) => String(value || '').trim()).filter(Boolean))];
+  ids.forEach((mangaId) => patchWorkbenchItem(mangaId, { status: 'pending', decision: null, reviewedAt: null, error: null, jobId: null }));
+  const job = jobOrchestrator.enqueue({
+    kind: 'workbench-analysis',
+    payload: { mangaIds: ids, autoApply: true },
+    requeueable: true,
+    progress: { phase: 'queued', completed: 0, total: ids.length, percent: 0 }
+  });
+  return { ok: true, revision: stateRevision, job };
+});
+
+ipcMain.handle('metadata:cancelWorkbenchJob', (_event, jobId) => {
+  const job = jobOrchestrator.cancel(String(jobId || '').trim());
+  return job ? { ok: true, revision: stateRevision, job } : { ok: false, revision: stateRevision, error: 'Tache introuvable.' };
+});
+
+ipcMain.handle('metadata:undoLastWorkbenchBatch', () => {
+  let restoredIds = [];
+  updateStateSegments({ metadata: ['metadata', 'metadataFieldSource'], organization: ['metadataWorkbenchItems', 'metadataWorkbenchLastBatch'] }, (state) => {
+    const batch = state.metadataWorkbenchLastBatch;
+    for (const entry of Array.isArray(batch?.entries) ? batch.entries : []) {
+      const mangaId = String(entry?.mangaId || '').trim();
+      if (!mangaId) continue;
+      state.metadata[mangaId] = structuredClone(entry.metadata || {});
+      state.metadataFieldSource[mangaId] = structuredClone(entry.fieldSources || {});
+      const item = (state.metadataWorkbenchItems || []).find((value) => value.mangaId === mangaId);
+      if (item) {
+        item.status = 'review';
+        item.decision = null;
+        item.reviewedAt = null;
+      }
+      restoredIds.push(mangaId);
+    }
+    state.metadataWorkbenchLastBatch = null;
+    return state;
+  });
+  return mutationResult({ restoredIds });
 });
 
 ipcMain.handle('metadata:updateFieldLocks', async (_event, mangaId, patch = {}) => {
@@ -5220,6 +5889,7 @@ ipcMain.handle('vault:unlock', async (_event, pin) => {
 });
 
 ipcMain.handle('vault:lock', async () => {
+  metadataProviderRegistry?.clearPrivateCache();
   updateState((state) => {
     if (!isVaultConfigured(state)) return state;
     state.vault.locked = true;

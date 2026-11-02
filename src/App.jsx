@@ -103,6 +103,10 @@ import {
   searchCompactIndex
 } from './utils/searchIndex.js';
 import {
+  normalizeReaderOpenIntent,
+  resolveReaderEntry
+} from './utils/readerProgress.js';
+import {
   advancedSearchResultsMatch,
   createAdvancedSearchState,
   createDeferredSearchController,
@@ -223,12 +227,28 @@ function sanitizeReaderState(state = null) {
   const zoom = Number(state.zoom);
   const scrollTop = Number(state.scrollTop);
   const scrollRatio = Number(state.scrollRatio);
+  const anchorPageIndex = Number(state.anchorPageIndex);
+  const intraPageOffset = Number(state.intraPageOffset);
+  const furthestPageIndex = Number(state.furthestPageIndex);
   return {
     mode: typeof state.mode === 'string' ? state.mode : null,
     fitMode: typeof state.fitMode === 'string' ? state.fitMode : null,
     zoom: Number.isFinite(zoom) ? zoom : null,
     scrollTop: Number.isFinite(scrollTop) ? scrollTop : 0,
-    scrollRatio: Number.isFinite(scrollRatio) ? scrollRatio : 0
+    scrollRatio: Number.isFinite(scrollRatio) ? scrollRatio : 0,
+    anchorPageIndex: Number.isFinite(anchorPageIndex) ? Math.max(0, Math.floor(anchorPageIndex)) : null,
+    intraPageOffset: Number.isFinite(intraPageOffset) ? Math.max(0, intraPageOffset) : 0,
+    furthestPageIndex: Number.isFinite(furthestPageIndex) ? Math.max(0, Math.floor(furthestPageIndex)) : null
+  };
+}
+
+function sanitizeReaderIntent(intent = null) {
+  if (!intent || typeof intent !== 'object') return null;
+  const kind = ['normal', 'exact-page', 'restart'].includes(intent.kind) ? intent.kind : 'normal';
+  return {
+    kind,
+    pageIndex: Math.max(0, Math.floor(Number(intent.pageIndex) || 0)),
+    token: typeof intent.token === 'string' && intent.token ? intent.token : `${kind}-restored`
   };
 }
 
@@ -240,8 +260,25 @@ function normalizeView(view = {}) {
     chapterId: null,
     pageIndex: 0,
     ...view,
-    readerState: normalizedReaderState
+    readerState: normalizedReaderState,
+    readerIntent: sanitizeReaderIntent(view?.readerIntent),
+    readerNotice: typeof view?.readerNotice === 'string' ? view.readerNotice : null
   };
+}
+
+const TAB_SCREEN_KEYS = new Set([
+  'library', 'dashboard', 'favorites', 'recents', 'collections',
+  'maintenance', 'workbench', 'vault', 'sources'
+]);
+
+function normalizeTabScreen(screen) {
+  const value = String(screen || '').trim();
+  return TAB_SCREEN_KEYS.has(value) ? value : 'library';
+}
+
+function normalizeVaultCategoryFilterId(value) {
+  const normalized = String(value || '').trim();
+  return normalized || null;
 }
 
 let tabSequence = 0;
@@ -249,6 +286,8 @@ function createTab(initialView, seedStack = [], options = {}) {
   tabSequence += 1;
   return {
     id: `tab-${Date.now()}-${tabSequence}`,
+    screen: normalizeTabScreen(options?.screen),
+    vaultCategoryFilterId: normalizeVaultCategoryFilterId(options?.vaultCategoryFilterId),
     pinned: false,
     incognito: Boolean(options?.incognito),
     searchPrivate: Boolean(options?.searchPrivate),
@@ -307,6 +346,8 @@ function sanitizeTab(candidate, fallbackIdPrefix = 'restored') {
     id: typeof candidate?.id === 'string' && candidate.id.trim()
       ? candidate.id
       : `${fallbackIdPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    screen: normalizeTabScreen(candidate?.screen),
+    vaultCategoryFilterId: normalizeVaultCategoryFilterId(candidate?.vaultCategoryFilterId),
     pinned: Boolean(candidate?.pinned),
     incognito: Boolean(candidate?.incognito),
     searchPrivate: Boolean(candidate?.searchPrivate),
@@ -374,13 +415,14 @@ export function restoreSessionModel(session) {
     };
   };
 
-  if ([2, 3, 4].includes(Number(session?.version)) && Array.isArray(session?.workspaces) && session.workspaces.length > 0) {
+  if ([2, 3, 4, 5, 6, 7, 8].includes(Number(session?.version)) && Array.isArray(session?.workspaces) && session.workspaces.length > 0) {
     const restoredWorkspaces = session.workspaces
       .slice(0, MAX_WORKSPACES)
       .map((workspace, index) => migrateWorkspaceSearchPrivacy(sanitizeWorkspace(workspace, index)));
 
     return {
       searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
+      version: 8,
       workspaces: restoredWorkspaces,
       activeWorkspaceId: restoredWorkspaces.some((workspace) => workspace.id === session?.activeWorkspaceId)
         ? session.activeWorkspaceId
@@ -414,6 +456,7 @@ export function restoreSessionModel(session) {
 
   return {
     searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
+    version: 8,
     workspaces: [defaultWorkspace],
     activeWorkspaceId: defaultWorkspace.id,
     scrollPositions: {}
@@ -457,12 +500,6 @@ function findChapter(library, mangaId, chapterId) {
   if (!manga) return { manga: null, chapter: null };
   const chapter = manga.chapters.find((item) => matchesEntityReference(item, chapterId)) ?? null;
   return { manga, chapter };
-}
-
-function chapterTargetView(ui, mangaId, chapterId, pageIndex = 0) {
-  return ui.showPagePreviewBeforeReading
-    ? { screen: 'preview', mangaId, chapterId, pageIndex: 0 }
-    : { screen: 'reader', mangaId, chapterId, pageIndex };
 }
 
 function makeViewScrollKey(tabId, view, activeScreen = 'library', screenContextKey = 'all') {
@@ -636,7 +673,6 @@ export default function App() {
   const [payload, setPayload] = useState(null);
   const [workspaces, setWorkspaces] = useState([INITIAL_WORKSPACE]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState(INITIAL_WORKSPACE.id);
-  const [activeScreen, setActiveScreen] = useState('library');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editingMetadata, setEditingMetadata] = useState(null);
   const [coverManagerManga, setCoverManagerManga] = useState(null);
@@ -694,11 +730,11 @@ export default function App() {
   const [sourcesSection, setSourcesSection] = useState('explorer');
   const [sourceExplorerContext, setSourceExplorerContext] = useState(null);
   const [panicSession, setPanicSession] = useState('inactive');
-  const [vaultCategoryFilterId, setVaultCategoryFilterId] = useState(null);
   const [renderedInterfaceMode, setRenderedInterfaceMode] = useState(null);
   const [interfaceTransitioning, setInterfaceTransitioning] = useState(false);
   const [interfaceTransitionError, setInterfaceTransitionError] = useState('');
   const [reliabilityIssues, setReliabilityIssues] = useState([]);
+  const [relocationNotice, setRelocationNotice] = useState(null);
   const [textPromptState, setTextPromptState] = useState({
     open: false,
     title: '',
@@ -714,7 +750,7 @@ export default function App() {
   const activeScrollRestorationRef = useRef({ key: '', position: null });
   const scrollPersistTimerRef = useRef(null);
   const [scrollPersistenceRevision, setScrollPersistenceRevision] = useState(0);
-  const screenHistoryRef = useRef([]);
+  const screenHistoryRef = useRef(new Map());
   const legacyExperimentalPatchPendingRef = useRef(false);
   const readerSessionStoreRef = useRef(null);
   const interfaceTransitionLockRef = useRef(false);
@@ -846,6 +882,9 @@ export default function App() {
 
   const tabs = activeWorkspace?.tabs ?? [INITIAL_TAB];
   const activeTabId = activeWorkspace?.activeTabId ?? tabs[0]?.id ?? INITIAL_TAB.id;
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? INITIAL_TAB;
+  const activeScreen = normalizeTabScreen(activeTab?.screen);
+  const vaultCategoryFilterId = normalizeVaultCategoryFilterId(activeTab?.vaultCategoryFilterId);
 
   const setTabs = useCallback((updater) => {
     setWorkspaces((prev) => prev.map((workspace) => {
@@ -867,6 +906,21 @@ export default function App() {
       };
     }));
   }, [activeWorkspaceId]);
+
+  const setActiveTabScreen = useCallback((nextScreen) => {
+    const normalizedScreen = normalizeTabScreen(nextScreen);
+    setTabs((currentTabs) => currentTabs.map((tab) => (
+      tab.id === activeTabId ? { ...tab, screen: normalizedScreen } : tab
+    )));
+  }, [activeTabId, setTabs]);
+
+  const setVaultCategoryFilterId = useCallback((nextValue) => {
+    const resolved = typeof nextValue === 'function' ? nextValue(vaultCategoryFilterId) : nextValue;
+    const normalizedValue = normalizeVaultCategoryFilterId(resolved);
+    setTabs((currentTabs) => currentTabs.map((tab) => (
+      tab.id === activeTabId ? { ...tab, vaultCategoryFilterId: normalizedValue } : tab
+    )));
+  }, [activeTabId, setTabs, vaultCategoryFilterId]);
 
   const setActiveTabId = useCallback((nextActiveTabId) => {
     setWorkspaces((prev) => prev.map((workspace) => {
@@ -1001,9 +1055,8 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!payload) return;
-
+  const flushTabsSessionNow = useCallback(async () => {
+    if (!payload) return false;
     const serializableWorkspaces = workspaces.map((workspace) => ({
       id: workspace.id,
       name: workspace.name,
@@ -1011,6 +1064,8 @@ export default function App() {
       activeTabId: workspace.activeTabId,
       tabs: workspace.tabs.map((tab) => ({
         id: tab.id,
+        screen: normalizeTabScreen(tab.screen),
+        vaultCategoryFilterId: normalizeVaultCategoryFilterId(tab.vaultCategoryFilterId),
         pinned: Boolean(tab.pinned),
         incognito: Boolean(tab.incognito),
         searchPrivate: Boolean(tab.searchPrivate)
@@ -1023,20 +1078,41 @@ export default function App() {
       }))
     }));
 
-    const timer = window.setTimeout(() => {
-      window.mangaAPI.saveTabsSession({
-        version: 4,
+    try {
+      await window.mangaAPI.saveTabsSession({
+        version: 8,
         searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
         activeWorkspaceId,
         workspaces: serializableWorkspaces,
         scrollPositions: normalizeScrollPositions(scrollPositionsRef.current)
-      }).catch(() => {
-        // Le stockage de session ne doit jamais casser l'UI.
       });
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }, [activeScreen, activeTabId, activeWorkspaceId, payload, workspaces]);
+
+  useEffect(() => {
+    if (!payload) return undefined;
+    let cancelled = false;
+    const unsubscribe = window.mangaAPI.onSessionFlushRequested?.(async (requestId) => {
+      const ok = await flushTabsSessionNow();
+      if (!cancelled) window.mangaAPI.acknowledgeSessionFlush?.(requestId, ok);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [flushTabsSessionNow, payload]);
+
+  useEffect(() => {
+    if (!payload) return undefined;
+    const timer = window.setTimeout(() => {
+      void flushTabsSessionNow();
     }, 180);
 
     return () => window.clearTimeout(timer);
-  }, [payload, workspaces, activeWorkspaceId, activeScreen, activeTabId, scrollPersistenceRevision]);
+  }, [flushTabsSessionNow, payload, scrollPersistenceRevision]);
 
   const scheduleScrollPersistence = useCallback(() => {
     if (scrollPersistTimerRef.current != null) window.clearTimeout(scrollPersistTimerRef.current);
@@ -1062,8 +1138,13 @@ export default function App() {
     setAddEntryMenuAnchor(null);
     setSourcesSection('explorer');
     setSourceExplorerContext(null);
-    setActiveScreen((current) => (current === 'sources' ? 'library' : current));
-  }, [plugins]);
+    setWorkspaces((current) => current.map((workspace) => workspace.id === activeWorkspaceId
+      ? {
+          ...workspace,
+          tabs: workspace.tabs.map((tab) => tab.screen === 'sources' ? { ...tab, screen: 'library' } : tab)
+        }
+      : workspace));
+  }, [activeWorkspaceId, plugins]);
 
   useEffect(() => {
     if (panicSession !== 'recovered') return undefined;
@@ -1093,6 +1174,8 @@ export default function App() {
       visualDedupe: false
     }
   };
+  const sawaExperience = ui.sawaExperience === 'classic' ? 'classic' : 'horizon';
+  const visualVariant = interfaceMode === 'sawa' ? sawaExperience : 'classic';
 
   useEffect(() => {
     if (!renderedInterfaceMode && payload) {
@@ -1199,8 +1282,11 @@ export default function App() {
     return library.categories.filter((category) => !category.hidden);
   }, [library.categories]);
 
-  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? INITIAL_TAB;
   const activeView = getTabView(activeTab);
+  const readerFocusActive = visualVariant === 'horizon'
+    && activeView.screen === 'reader'
+    && ui.readerFocusMode !== 'off';
+  const shellSidebarCollapsed = Boolean(ui.sidebarCollapsed);
   const activeSearchPrivacyLocked = Boolean(
     payload?.persisted?.vault?.locked
     || payload?.persisted?.vault?.stealthMode
@@ -1546,7 +1632,9 @@ export default function App() {
     [vaultCategories, vaultCategoryFilterId]
   );
 
-  const workbenchQueueIds = payload?.persisted?.metadataWorkbenchQueue ?? [];
+  const workbenchQueueIds = payload?.persisted?.metadataWorkbenchItems?.map((item) => item.mangaId)
+    ?? payload?.persisted?.metadataWorkbenchQueue
+    ?? [];
   const workbenchQueueMangas = useMemo(
     () => workbenchQueueIds.map((mangaId) => findManga(entityLibrary, mangaId)).filter(Boolean),
     [entityLibrary, workbenchQueueIds]
@@ -1676,7 +1764,7 @@ export default function App() {
   const selectedMangaIds = selectionSummary.selectedIds;
   const selectedMangaIdSet = selectionSummary.selectedIdSet;
   const selectedMangas = useMemo(
-    () => selectableMangas.filter((manga) => selectedMangaIdSet.has(manga.id)),
+    () => selectableMangas.filter((manga) => selectedMangaIdSet.has(String(manga.id ?? '').trim())),
     [selectableMangas, selectedMangaIdSet]
   );
 
@@ -1845,12 +1933,12 @@ export default function App() {
 
   useEffect(() => {
     if (!payload) return;
-    const visibleIds = new Set(library.allMangas.map((manga) => manga.id));
+    const visibleIds = new Set(selectableMangas.map((manga) => String(manga.id ?? '').trim()).filter(Boolean));
     const removedIds = activeSelectionSession.selectedIds.filter((mangaId) => !visibleIds.has(mangaId));
     if (removedIds.length > 0) {
       dispatchSelection({ type: 'remove', key: activeSelectionKey, ids: removedIds });
     }
-  }, [activeSelectionKey, activeSelectionSession.selectedIds, payload, library.allMangas]);
+  }, [activeSelectionKey, activeSelectionSession.selectedIds, payload, selectableMangas]);
 
   useEffect(() => {
     if (!payload || activeScreen !== 'maintenance') return;
@@ -1952,6 +2040,7 @@ export default function App() {
         : null;
 
       if (view.screen === 'library') {
+        const tabScreen = normalizeTabScreen(tab.screen);
         const screenLabels = {
           dashboard: 'Dashboard',
           library: 'Bibliotheque',
@@ -1977,8 +2066,8 @@ export default function App() {
           id: tab.id,
           kind: 'library',
           pinned: Boolean(tab.pinned),
-          label: screenLabels[activeScreen] || 'Bibliotheque',
-          subtitle: screenSubtitles[activeScreen] || selectedCategory?.name || 'Toute la bibliotheque'
+           label: screenLabels[tabScreen] || 'Bibliotheque',
+           subtitle: screenSubtitles[tabScreen] || selectedCategory?.name || 'Toute la bibliotheque'
         });
       }
 
@@ -2451,21 +2540,26 @@ export default function App() {
 
   function rememberScreenTransition(nextScreen) {
     if (!nextScreen || nextScreen === activeScreen) return;
-    const history = screenHistoryRef.current;
+    const history = screenHistoryRef.current.get(activeTabId) || [];
     if (history[history.length - 1] !== activeScreen) {
       history.push(activeScreen);
       if (history.length > 24) {
         history.splice(0, history.length - 24);
       }
     }
+    screenHistoryRef.current.set(activeTabId, history);
   }
 
   function pullPreviousScreen(fallbackScreen = 'library') {
-    const history = screenHistoryRef.current;
+    const history = screenHistoryRef.current.get(activeTabId) || [];
     while (history.length > 0) {
       const previous = history.pop();
-      if (previous && previous !== activeScreen) return previous;
+      if (previous && previous !== activeScreen) {
+        screenHistoryRef.current.set(activeTabId, history);
+        return previous;
+      }
     }
+    screenHistoryRef.current.set(activeTabId, history);
     return fallbackScreen;
   }
 
@@ -2480,7 +2574,7 @@ export default function App() {
     if (!options.replaceHistory) {
       rememberScreenTransition(screen);
     }
-    setActiveScreen(screen);
+    setActiveTabScreen(screen);
   }
 
   function handleScreenChange(screen) {
@@ -2638,7 +2732,7 @@ export default function App() {
         if (previousScreen !== 'vault' && (activeScreen === 'vault' || activeTab?.searchPrivate)) {
           neutralizeActivePrivateSearch({ leavingPrivateContext: activeScreen === 'vault' });
         }
-        setActiveScreen(previousScreen);
+        setActiveTabScreen(previousScreen);
       }
     };
 
@@ -2681,15 +2775,21 @@ export default function App() {
     scheduleScrollPersistence();
   }, [activeScrollKey, scheduleScrollPersistence]);
 
-  const buildReaderViewForChapter = useCallback((mangaId, chapterId, fallbackPageIndex = 0, preferSavedProgress = false) => {
+  const buildReaderViewForChapter = useCallback((mangaId, chapterId, fallbackPageIndex = 0, intentKind = 'normal') => {
     const { chapter } = findChapter(entityLibrary, mangaId, chapterId);
-    const progress = preferSavedProgress ? chapter?.progress ?? null : null;
+    const entry = resolveReaderEntry({
+      chapter,
+      fallbackPageIndex,
+      intent: normalizeReaderOpenIntent({ kind: intentKind, pageIndex: fallbackPageIndex }, fallbackPageIndex)
+    });
     return {
       screen: 'reader',
       mangaId,
       chapterId,
-      pageIndex: progress?.pageIndex ?? fallbackPageIndex,
-      readerState: sanitizeReaderState(progress)
+      pageIndex: entry.pageIndex,
+      readerState: sanitizeReaderState(entry.readerState),
+      readerIntent: entry.intent,
+      readerNotice: entry.notice
     };
   }, [entityLibrary]);
 
@@ -2709,14 +2809,8 @@ export default function App() {
       return { screen: 'manga', mangaId, chapterId: null, pageIndex: 0, readerState: null };
     }
 
-    return {
-      screen: 'reader',
-      mangaId,
-      chapterId,
-      pageIndex: resumeProgress?.pageIndex ?? 0,
-      readerState: sanitizeReaderState(resumeProgress)
-    };
-  }, [entityLibrary]);
+    return buildReaderViewForChapter(mangaId, chapterId, resumeProgress?.pageIndex ?? 0, 'normal');
+  }, [buildReaderViewForChapter, entityLibrary]);
 
   const isCurrentTabIncognito = Boolean(activeTab?.incognito);
 
@@ -2799,11 +2893,17 @@ export default function App() {
   }
 
   function openChapterInCurrentTab(mangaId, chapterId, pageIndex = 0) {
-    pushViewToActive(chapterTargetView(ui, mangaId, chapterId, pageIndex));
+    const nextView = ui.showPagePreviewBeforeReading
+      ? { screen: 'preview', mangaId, chapterId, pageIndex: 0 }
+      : buildReaderViewForChapter(mangaId, chapterId, pageIndex, pageIndex > 0 ? 'exact-page' : 'normal');
+    pushViewToActive(nextView);
   }
 
   function openChapterInNewTab(mangaId, chapterId, pageIndex = 0, options = {}) {
-    openNewTab(chapterTargetView(ui, mangaId, chapterId, pageIndex), [normalizeView(), { screen: 'manga', mangaId }], options);
+    const nextView = ui.showPagePreviewBeforeReading
+      ? { screen: 'preview', mangaId, chapterId, pageIndex: 0 }
+      : buildReaderViewForChapter(mangaId, chapterId, pageIndex, pageIndex > 0 ? 'exact-page' : 'normal');
+    openNewTab(nextView, [normalizeView(), { screen: 'manga', mangaId }], options);
   }
 
   function resumeMangaInCurrentTab(mangaId) {
@@ -2816,7 +2916,7 @@ export default function App() {
   }
 
   function resumeChapterInCurrentTab(mangaId, chapterId, fallbackPageIndex = 0) {
-    pushViewToActive(buildReaderViewForChapter(mangaId, chapterId, fallbackPageIndex, true));
+    pushViewToActive(buildReaderViewForChapter(mangaId, chapterId, fallbackPageIndex, 'normal'));
   }
 
   async function toggleSidebarCollapsed() {
@@ -2889,6 +2989,57 @@ export default function App() {
 
   async function handleRemoveCategory(categoryId) {
     await refreshWith(window.mangaAPI.removeCategory(categoryId));
+  }
+
+  async function handleRelinkCategory(categoryId) {
+    setRelocationNotice({ kind: 'working', title: 'Recherche du nouvel emplacement…', message: 'Choisissez le dossier qui contient maintenant cette categorie.' });
+    const picked = await window.mangaAPI.pickRelocationTarget(categoryId);
+    if (!picked?.ok || picked?.canceled) {
+      setRelocationNotice(picked?.error ? { kind: 'error', title: 'Rattachement impossible', message: picked.error } : null);
+      return;
+    }
+    setRelocationNotice({ kind: 'working', title: 'Comparaison en cours…', message: 'Les empreintes des oeuvres et chapitres sont verifiees en arriere-plan.' });
+    const inspected = await window.mangaAPI.inspectRelocation({ categoryId, targetPath: picked.path });
+    if (!inspected?.ok) {
+      setRelocationNotice({ kind: 'error', title: 'Nouvel emplacement non reconnu', message: inspected?.error || 'La comparaison a echoue.' });
+      return;
+    }
+    if (!inspected.plan?.autoApplicable) {
+      const matched = inspected.plan?.mangaMatches?.length || 0;
+      const total = matched + (inspected.plan?.unmatched?.length || 0);
+      setRelocationNotice({
+        kind: 'warning',
+        title: 'Verification manuelle requise',
+        message: `${matched}/${total || 0} oeuvre(s) reconnue(s). Le cas a ete conserve sans modifier vos donnees.`
+      });
+      return;
+    }
+    const applied = await window.mangaAPI.applyRelocation(inspected.plan.id);
+    if (!applied?.ok) {
+      setRelocationNotice({ kind: 'error', title: 'Rattachement non applique', message: applied?.error || 'Aucune donnee n a ete modifiee.' });
+      return;
+    }
+    startTransition(() => setPayload((previous) => mergePayloadForStability(previous, applied.payload)));
+    const missingChapterCount = inspected.plan?.unmatchedChapters?.length || 0;
+    setRelocationNotice({
+      kind: 'success',
+      title: 'Categorie retrouvee',
+      message: missingChapterCount > 0
+        ? `Les donnees ont ete rattachees a ${picked.path}. ${missingChapterCount} ancien(s) chapitre(s) absent(s) du dossier restent conserves.`
+        : `Les donnees ont ete rattachees a ${picked.path}.`,
+      relocationId: applied.relocation?.id || null
+    });
+  }
+
+  async function handleUndoRelocation(relocationId) {
+    if (!relocationId) return;
+    const result = await window.mangaAPI.undoRelocation(relocationId);
+    if (!result?.ok) {
+      setRelocationNotice({ kind: 'error', title: 'Annulation impossible', message: result?.error || 'Le rattachement a change depuis son application.' });
+      return;
+    }
+    startTransition(() => setPayload((previous) => mergePayloadForStability(previous, result.payload)));
+    setRelocationNotice({ kind: 'success', title: 'Rattachement annule', message: 'Le dernier emplacement connu a ete restaure.' });
   }
 
   async function handleToggleFavorite(mangaId) {
@@ -3507,12 +3658,32 @@ export default function App() {
 
   async function handleQueueWorkbench(mangaIds, mode = 'append') {
     if (!Array.isArray(mangaIds) || mangaIds.length === 0) return;
-    await refreshWith(window.mangaAPI.queueMetadataWorkbench(mangaIds, mode));
+    const result = await window.mangaAPI.queueMetadataWorkbench(mangaIds, mode);
+    if (result?.ok) {
+      setPayload((previous) => previous ? {
+        ...previous,
+        persisted: {
+          ...previous.persisted,
+          metadataWorkbenchQueue: result.metadataWorkbenchQueue || result.patch?.metadataWorkbenchQueue || [],
+          metadataWorkbenchItems: result.metadataWorkbenchItems || result.patch?.metadataWorkbenchItems || []
+        }
+      } : previous);
+    }
     navigateToScreen('workbench');
   }
 
   async function handleReplaceWorkbenchQueue(mangaIds) {
-    await refreshWith(window.mangaAPI.setMetadataWorkbenchQueue(mangaIds));
+    const result = await window.mangaAPI.setMetadataWorkbenchQueue(mangaIds);
+    if (result?.ok) {
+      setPayload((previous) => previous ? {
+        ...previous,
+        persisted: {
+          ...previous.persisted,
+          metadataWorkbenchQueue: result.metadataWorkbenchQueue || result.patch?.metadataWorkbenchQueue || [],
+          metadataWorkbenchItems: result.metadataWorkbenchItems || result.patch?.metadataWorkbenchItems || []
+        }
+      } : previous);
+    }
   }
 
   async function handleImportWorkbenchMatch(mangaId, result) {
@@ -3856,7 +4027,7 @@ export default function App() {
     if (!item?.mangaId) return;
     setReadingQueueOpen(false);
     if (item.chapterId) {
-      const view = buildReaderViewForChapter(item.mangaId, item.chapterId, 0, true);
+      const view = buildReaderViewForChapter(item.mangaId, item.chapterId, 0, 'normal');
       if (activeView.screen === 'reader') {
         replaceActiveView(view);
       } else {
@@ -3972,10 +4143,19 @@ export default function App() {
       const topIndex = stack.length - 1;
       const topView = stack[topIndex];
       if (!topView || topView.screen !== 'reader' || topView.chapterId !== progressPayload.chapterId) return tab;
+      const settledReaderIntent = topView.readerIntent
+        ? {
+            ...topView.readerIntent,
+            kind: 'normal',
+            pageIndex: Math.max(0, Math.floor(Number(progressPayload.pageIndex) || 0))
+          }
+        : null;
       stack[topIndex] = normalizeView({
         ...topView,
         pageIndex: progressPayload.pageIndex,
-        readerState: sanitizeReaderState(progressPayload)
+        readerState: sanitizeReaderState(progressPayload),
+        readerIntent: settledReaderIntent,
+        readerNotice: null
       });
       return { ...tab, stack };
     }));
@@ -4172,6 +4352,10 @@ export default function App() {
     if (context.type === 'category' && context.category) {
       const isCategoryPrivate = Array.isArray(vaultState.privateCategoryIds) && vaultState.privateCategoryIds.includes(context.category.id);
       items.push(
+        ...(context.category.exists === false || context.category.availability === 'missing' ? [
+          actionItem('Retrouver le dossier', () => handleRelinkCategory(context.category.id), { icon: <FolderPlusIcon size={14} /> }),
+          separatorItem()
+        ] : []),
         actionItem(
           context.scope === 'vault' ? 'Voir cette categorie dans le coffre' : 'Filtrer sur cette categorie',
           () => {
@@ -4483,7 +4667,8 @@ export default function App() {
     ? 'Retirer du coffre'
     : 'Envoyer au coffre';
   const shouldShowTopBar = activeView.screen === 'library'
-    && !['dashboard', 'collections', 'maintenance', 'workbench', 'sources'].includes(activeScreen);
+    && !['dashboard', 'collections', 'maintenance', 'workbench', 'sources'].includes(activeScreen)
+    && !(activeScreen === 'vault' && (vaultState.locked || !vaultState.configured));
   const topBarCategory = activeScreen === 'vault' ? activeVaultCategory : selectedCategory;
   const clearTopBarCategory = activeScreen === 'vault'
     ? () => setVaultCategoryFilterId(null)
@@ -4571,21 +4756,18 @@ export default function App() {
           pageIndex,
           { incognito: true }
         ),
-        onReadFrom: (mangaId, chapterId, pageIndex) => pushViewToActive({
-          screen: 'reader',
-          mangaId,
-          chapterId,
-          pageIndex
-        }),
+        onReadFrom: (mangaId, chapterId, pageIndex) => pushViewToActive(
+          buildReaderViewForChapter(mangaId, chapterId, pageIndex, 'exact-page')
+        ),
         onReadFromInNewTab: (mangaId, chapterId, pageIndex, options = {}) => openNewTab(
-          { screen: 'reader', mangaId, chapterId, pageIndex },
+          buildReaderViewForChapter(mangaId, chapterId, pageIndex, 'exact-page'),
           [normalizeView(), { screen: 'manga', mangaId }, { screen: 'preview', mangaId, chapterId }],
           options
         ),
         onReaderExit: handleReaderExit,
         onOpenReaderChapter: async (chapterId) => {
           await flushReaderSession();
-          replaceActiveView(buildReaderViewForChapter(currentChapterData.manga?.id, chapterId, 0, true));
+          replaceActiveView(buildReaderViewForChapter(currentChapterData.manga?.id, chapterId, 0, 'normal'));
         },
         onUpdateProgress: handleKavitaProgress,
         onReaderSettingsChange: handleKavitaReaderSettings,
@@ -4736,13 +4918,16 @@ export default function App() {
     <ShellErrorBoundary key={`shell-${interfaceMode}`} onError={handleShellMountError}>
       <>
       <div
-      className={`app-shell theme-${theme} ${interfaceClassName}`}
+      className={`app-shell theme-${theme} ${interfaceClassName} sawa-${sawaExperience} ${readerFocusActive ? 'sawa-reader-focus' : ''}`}
       style={{
         '--accent': ui.accent,
         '--accent-alt': ui.accentAlt || '#38bdf8',
         '--card-min': cardSizeMinWidth(ui.cardSize),
         '--manga-card-min-width': cardSizeMinWidth(ui.cardSize),
-        '--manga-grid-gap': cardSizeGridGap(ui.cardSize)
+        '--manga-grid-gap': cardSizeGridGap(ui.cardSize),
+        '--sawa-cinematic-intensity': `${Math.max(0, Math.min(100, Number(ui.cinematicIntensity ?? 58)))}%`,
+        '--sawa-foil-intensity': Math.max(0, Math.min(100, Number(ui.foilIntensity ?? 28))) / 100,
+        '--sawa-custom-backdrop-factor': ui.backgroundImage ? 0.36 : 1
       }}
       onContextMenu={stableOpenContextMenu}
     >
@@ -4756,7 +4941,9 @@ export default function App() {
         />
       )}
       <TitleBar
-        sidebarCollapsed={ui.sidebarCollapsed}
+        sidebarCollapsed={shellSidebarCollapsed}
+        readerFocus={readerFocusActive}
+        visualVariant={visualVariant}
         onToggleSidebar={toggleSidebarCollapsed}
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
@@ -4825,9 +5012,10 @@ export default function App() {
         onAddCategories={handleOpenAddCategories}
         onOpenWebSources={handleOpenWebSources}
       />
-      <div className={`layout-shell ${ui.sidebarCollapsed ? 'layout-shell-sidebar-collapsed' : ''}`}>
+      <div className={`layout-shell ${shellSidebarCollapsed ? 'layout-shell-sidebar-collapsed' : ''} ${readerFocusActive ? 'layout-shell-reader-focus' : ''}`}>
         <Sidebar
-          collapsed={ui.sidebarCollapsed}
+          collapsed={shellSidebarCollapsed || readerFocusActive}
+          visualVariant={visualVariant}
           onToggleCollapsed={toggleSidebarCollapsed}
           activeScreen={activeScreen}
           onScreenChange={handleScreenChange}
@@ -4838,6 +5026,7 @@ export default function App() {
           onAddCategories={handleAddEntry}
           onToggleCategoryHidden={handleToggleCategoryHidden}
           onRemoveCategory={handleRemoveCategory}
+          onRelinkCategory={handleRelinkCategory}
           onOpenSettings={() => setSettingsOpen(true)}
           showHiddenCategories={ui.showHiddenCategories}
           onContextMenu={stableOpenContextMenu}
@@ -4889,7 +5078,7 @@ export default function App() {
             />
           )}
 
-          {activeView.screen === 'library' && selectionMode && (
+          {activeView.screen === 'library' && selectionMode && !(activeScreen === 'vault' && (vaultState.locked || !vaultState.configured)) && (
             <BulkActionBar
               selectionCount={selectedMangaIds.length}
               hiddenCount={selectionSummary.hiddenCount}
@@ -4951,6 +5140,11 @@ export default function App() {
             {activeView.screen === 'library' && activeScreen === 'collections' && (
               <Suspense fallback={<LazyPanelPlaceholder label="Chargement des collections..." />}>
                 <CollectionsView
+                  visualVariant={visualVariant}
+                  cardSize={ui.cardSize}
+                  foilEnabled={ui.foilEnabled !== false}
+                  foilIntensity={Number(ui.foilIntensity ?? 28)}
+                  adaptiveVisualEffects={ui.adaptiveVisualEffects !== false}
                   allMangas={projectCanonicalMangas(library.allMangas, workGroups)}
                   persisted={payload?.persisted ?? {}}
                   onOpenManga={stableOpenManga}
@@ -5066,6 +5260,10 @@ export default function App() {
             {activeView.screen === 'library' && activeScreen === 'vault' && (
               <Suspense fallback={<LazyPanelPlaceholder label="Chargement du coffre..." />}>
                 <VaultView
+                  visualVariant={visualVariant}
+                  foilEnabled={ui.foilEnabled !== false}
+                  foilIntensity={Number(ui.foilIntensity ?? 28)}
+                  adaptiveVisualEffects={ui.adaptiveVisualEffects !== false}
                   initialScrollTop={activeInitialScrollTop}
                   scrollKey={activeScrollKey}
                   onScrollPositionChange={handleViewScrollPositionChange}
@@ -5113,11 +5311,18 @@ export default function App() {
               selectionMode={selectionMode}
               selectedIds={selectedMangaIdSet}
               onToggleSelect={stableToggleSelectedManga}
+              visualVariant={visualVariant}
+              cinematicBackdrop={ui.cinematicBackdrop !== false}
+              cinematicIntensity={Number(ui.cinematicIntensity ?? 58)}
+              foilEnabled={ui.foilEnabled !== false}
+              foilIntensity={Number(ui.foilIntensity ?? 28)}
+              adaptiveVisualEffects={ui.adaptiveVisualEffects !== false}
             />
           )}
 
           {activeView.screen === 'manga' && currentManga && (
             <MangaDetailView
+              visualVariant={visualVariant}
               manga={currentManga}
               allTags={payload?.persisted?.tags ?? {}}
               allCollections={allCollections}
@@ -5138,7 +5343,7 @@ export default function App() {
               onImportOnlineMetadata={handleImportOnlineMetadata}
               onOpenAnnotation={(annotation) => {
                 if (!annotation?.chapterId) return;
-                replaceActiveView(buildReaderViewForChapter(currentManga.id, annotation.chapterId, annotation.pageIndex ?? 0, true));
+                replaceActiveView(buildReaderViewForChapter(currentManga.id, annotation.chapterId, annotation.pageIndex ?? 0, 'exact-page'));
               }}
               onSelectEdition={(mangaId) => replaceActiveView({ screen: 'manga', mangaId, chapterId: null, pageIndex: 0 })}
               onSetPreferredEdition={handleSetPreferredEdition}
@@ -5152,29 +5357,30 @@ export default function App() {
 
           {activeView.screen === 'preview' && currentChapterData.manga && resolvedChapter && (
             <ChapterPreviewView
+              visualVariant={visualVariant}
               manga={currentChapterData.manga}
               chapter={resolvedChapter}
               initialScrollTop={activeInitialScrollTop}
               onScrollPositionChange={handleViewScrollPositionChange}
               onBack={popActiveView}
-              onReadFrom={(pageIndex) => pushViewToActive({
-                screen: 'reader',
-                mangaId: currentChapterData.manga.id,
-                chapterId: resolvedChapter.id,
-                pageIndex
-              })}
-              onReadFromNewTab={(pageIndex) => openNewTab({
-                screen: 'reader',
-                mangaId: currentChapterData.manga.id,
-                chapterId: resolvedChapter.id,
-                pageIndex
-              }, [normalizeView(), { screen: 'manga', mangaId: currentChapterData.manga.id }, { screen: 'preview', mangaId: currentChapterData.manga.id, chapterId: resolvedChapter.id, pageIndex: 0 }])}
-              onReadFromBackgroundTab={(pageIndex) => openNewTab({
-                screen: 'reader',
-                mangaId: currentChapterData.manga.id,
-                chapterId: resolvedChapter.id,
-                pageIndex
-              }, [normalizeView(), { screen: 'manga', mangaId: currentChapterData.manga.id }, { screen: 'preview', mangaId: currentChapterData.manga.id, chapterId: resolvedChapter.id, pageIndex: 0 }], { activate: false })}
+              onReadFrom={(pageIndex, intentKind = 'exact-page') => pushViewToActive(buildReaderViewForChapter(
+                currentChapterData.manga.id,
+                resolvedChapter.id,
+                pageIndex,
+                intentKind
+              ))}
+              onReadFromNewTab={(pageIndex, intentKind = 'exact-page') => openNewTab(buildReaderViewForChapter(
+                currentChapterData.manga.id,
+                resolvedChapter.id,
+                pageIndex,
+                intentKind
+              ), [normalizeView(), { screen: 'manga', mangaId: currentChapterData.manga.id }, { screen: 'preview', mangaId: currentChapterData.manga.id, chapterId: resolvedChapter.id, pageIndex: 0 }])}
+              onReadFromBackgroundTab={(pageIndex, intentKind = 'exact-page') => openNewTab(buildReaderViewForChapter(
+                currentChapterData.manga.id,
+                resolvedChapter.id,
+                pageIndex,
+                intentKind
+              ), [normalizeView(), { screen: 'manga', mangaId: currentChapterData.manga.id }, { screen: 'preview', mangaId: currentChapterData.manga.id, chapterId: resolvedChapter.id, pageIndex: 0 }], { activate: false })}
               onOpenSourceSeries={handleOpenSourceSeriesForManga}
               pagePreviewSize={ui.pagePreviewSize}
               previewQuality={ui.previewQuality}
@@ -5185,6 +5391,7 @@ export default function App() {
 
           {activeView.screen === 'reader' && currentChapterData.manga && resolvedChapter && (
             <ReaderView
+              key={`${activeTab.id}:${currentChapterData.manga.contentId || currentChapterData.manga.id}:${resolvedChapter.contentId || resolvedChapter.id}:${activeView.readerIntent?.token || 'restored'}`}
               manga={currentChapterData.manga}
               chapter={resolvedChapter}
               chapters={currentChapterData.manga.chapters ?? []}
@@ -5192,13 +5399,17 @@ export default function App() {
               experimentalFeatures={ui.experimental ?? {}}
               focusToken={activeTab.id}
               initialPageIndex={activeView.pageIndex}
-              initialReaderState={sanitizeReaderState(activeView.readerState) || sanitizeReaderState(resolvedChapter.progress)}
+              initialReaderState={sanitizeReaderState(activeView.readerState)}
+              readerIntent={sanitizeReaderIntent(activeView.readerIntent)}
+              entryNotice={activeView.readerNotice}
               preferredMode={ui.readerMode}
               preferredFitMode={ui.readerFit}
               preferredZoom={ui.readerZoom ?? 1}
-              autoHideUI={!!ui.autoHideReaderUI}
+              autoHideUI={readerFocusActive || !!ui.autoHideReaderUI}
+              controlsHideMs={Number(ui.readerControlsHideMs ?? 3000)}
+              visualVariant={visualVariant}
               onExit={handleReaderExit}
-              onOpenChapter={(chapterId) => replaceActiveView(buildReaderViewForChapter(currentChapterData.manga.id, chapterId, 0, true))}
+              onOpenChapter={(chapterId) => replaceActiveView(buildReaderViewForChapter(currentChapterData.manga.id, chapterId, 0, 'normal'))}
               onUpdateProgress={handleUpdateProgress}
               onAddAnnotation={handleAddAnnotation}
               onDeleteAnnotation={handleDeleteAnnotation}
@@ -5258,6 +5469,7 @@ export default function App() {
           <SettingsDrawer
             open={settingsOpen}
             ui={ui}
+            visualVariant={visualVariant}
             vault={vaultState}
             syncStatus={syncStatus}
             onClose={() => setSettingsOpen(false)}
@@ -5376,6 +5588,22 @@ export default function App() {
         onDismiss={handleDismissReliabilityIssue}
         onRetrySync={handleRetryBackgroundSync}
       />
+      {relocationNotice ? (
+        <aside className={`relocation-notice relocation-notice-${relocationNotice.kind}`} role="status" aria-live="polite">
+          <div>
+            <strong>{relocationNotice.title}</strong>
+            <span>{relocationNotice.message}</span>
+          </div>
+          <div className="relocation-notice-actions">
+            {relocationNotice.relocationId ? (
+              <button type="button" onClick={() => handleUndoRelocation(relocationNotice.relocationId)}>Annuler</button>
+            ) : null}
+            {relocationNotice.kind !== 'working' ? (
+              <button type="button" onClick={() => setRelocationNotice(null)}>Fermer</button>
+            ) : null}
+          </div>
+        </aside>
+      ) : null}
       </div>
       {interfaceTransitioning ? <div className="interface-transition-veil" aria-hidden="true" /> : null}
       {interfaceTransitionError ? <div className="interface-transition-error" role="alert">{interfaceTransitionError}</div> : null}

@@ -80,7 +80,8 @@ function deriveChapterReadingState(chapter = {}, persistedState = {}) {
   if (isChapterMarkedRead(chapter, persistedState)) return 'read';
 
   const progress = resolveChapterProgress(chapter, persistedState);
-  if (progress && Number(progress.pageCount || 0) > 0 && Number(progress.pageIndex || 0) >= Number(progress.pageCount || 0) - 1) {
+  const furthestPageIndex = Number(progress?.furthestPageIndex ?? progress?.pageIndex) || 0;
+  if (progress && Number(progress.pageCount || 0) > 0 && furthestPageIndex >= Number(progress.pageCount || 0) - 1) {
     return 'read';
   }
   if (progress && Number(progress.pageIndex || 0) > 0) return 'in-progress';

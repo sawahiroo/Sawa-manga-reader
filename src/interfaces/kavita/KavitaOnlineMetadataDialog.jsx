@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import MetadataCandidateCover from '../../components/MetadataCandidateCover.jsx';
 import { Download, Search, X } from 'lucide-react';
 
 export default function KavitaOnlineMetadataDialog({
@@ -72,7 +73,7 @@ export default function KavitaOnlineMetadataDialog({
               const itemId = item.malId || item.id || item.title;
               return (
                 <article key={itemId}>
-                  {(item.coverPreviewSrc || item.coverUrl) ? <img src={item.coverPreviewSrc || item.coverUrl} alt="" /> : <div className="kv-cover-fallback">?</div>}
+                  <MetadataCandidateCover candidate={item} alt="" fallback={<div className="kv-cover-fallback">?</div>} />
                   <div>
                     <strong>{item.title}</strong>
                     <span>{item.authors || item.titleJapanese || 'Source en ligne'}</span>

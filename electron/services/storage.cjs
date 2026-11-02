@@ -31,8 +31,8 @@ function getElectronApp() {
   return cachedElectronApp;
 }
 
-const STORAGE_VERSION = 4;
-const STATE_VERSION = 4;
+const STORAGE_VERSION = 7;
+const STATE_VERSION = 7;
 const SCAN_INDEX_VERSION = 1;
 const QUEUE_VERSION = 1;
 const METADATA_VERSION = 1;
@@ -40,6 +40,10 @@ const SPLIT_STORAGE_VERSION = 1;
 const SEARCH_PRIVACY_VERSION = 1;
 const MAX_WORKSPACES = 8;
 const WORKSPACE_ICON_KEYS = ['home', 'library', 'layout', 'scroll', 'heart', 'sparkles', 'layers', 'book'];
+const TAB_SCREEN_KEYS = new Set([
+  'library', 'dashboard', 'favorites', 'recents', 'collections',
+  'maintenance', 'workbench', 'vault', 'sources'
+]);
 const ROOT_STATE_FILE = 'state.json';
 const LEGACY_V2_STATE_FILE = 'sawa-manga-state-v2.json';
 const LEGACY_V1_STATE_FILE = 'sawa-manga-state.json';
@@ -74,9 +78,9 @@ const ROOT_STATE_KEYS = [
 
 const USER_DATA_KEY_GROUPS = {
   metadata: ['metadata', 'metadataLocks', 'metadataFieldSource', 'coverProfiles'],
-  organization: ['favorites', 'tags', 'mangaTags', 'mangaTagMeta', 'collections', 'smartCollections', 'annotations', 'metadataWorkbenchQueue', 'readingQueue', 'plugins'],
+  organization: ['favorites', 'tags', 'mangaTags', 'mangaTagMeta', 'collections', 'smartCollections', 'annotations', 'metadataWorkbenchQueue', 'metadataWorkbenchItems', 'metadataWorkbenchLastBatch', 'readingQueue', 'plugins'],
   reader: ['readingStates', 'chapterStates', 'readStatus', 'chapterReadStatus', 'progress', 'recents', 'readerPrefs'],
-  identity: ['knownChapterCounts', 'identityAliases', 'identityRecords', 'identitySuggestions', 'identityMediaIssues', 'workGroups', 'deletionTombstones']
+  identity: ['knownChapterCounts', 'identityAliases', 'identityRecords', 'identitySuggestions', 'identityMediaIssues', 'workGroups', 'deletionTombstones', 'relocationJournal']
 };
 
 const DEFAULT_SIDEBAR_SECTIONS = [
@@ -128,7 +132,7 @@ const DEFAULT_STATE = {
     entries: {}
   },
   session: {
-    version: 4,
+    version: 8,
     searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
     activeWorkspaceId: null,
     workspaces: [],
@@ -146,6 +150,14 @@ const DEFAULT_STATE = {
     chapterCardSize: 'comfortable',
     pagePreviewSize: 'comfortable',
     previewQuality: 'balanced',
+    sawaExperience: 'horizon',
+    cinematicBackdrop: true,
+    cinematicIntensity: 58,
+    foilEnabled: true,
+    foilIntensity: 28,
+    adaptiveVisualEffects: true,
+    readerFocusMode: 'auto',
+    readerControlsHideMs: 3000,
     accent: '#8b5cf6',
     accentAlt: '#38bdf8',
     showPagePreviewBeforeReading: true,
@@ -168,6 +180,17 @@ const DEFAULT_STATE = {
     autoMarkReadThreshold: 95,
     continuousReading: true,
     allowNsfwSources: false,
+    metadataProviders: {
+      enabled: {
+        mangadex: true,
+        anilist: true,
+        nhentai: true,
+        imhentai: false,
+        hentaiera: false
+      },
+      preferredAdultMirror: 'imhentai',
+      allowAdultHtmlFallback: false
+    },
     activeScreen: 'dashboard',
     dashboardLayout: [],
     dashboardHiddenSections: {},
@@ -215,6 +238,8 @@ const DEFAULT_STATE = {
   },
   annotations: {},
   metadataWorkbenchQueue: [],
+  metadataWorkbenchItems: [],
+  metadataWorkbenchLastBatch: null,
   readingQueue: [],
   plugins: {
     enabled: {},
@@ -245,6 +270,7 @@ const DEFAULT_STATE = {
   identityMediaIssues: [],
   workGroups: {},
   deletionTombstones: {},
+  relocationJournal: [],
   readerPrefs: {},
   backupHistory: [],
   migrationLog: []
@@ -377,12 +403,18 @@ function normalizeReaderState(state) {
   const zoom = Number(state.zoom);
   const scrollTop = Number(state.scrollTop);
   const scrollRatio = Number(state.scrollRatio);
+  const anchorPageIndex = Number(state.anchorPageIndex);
+  const intraPageOffset = Number(state.intraPageOffset);
+  const furthestPageIndex = Number(state.furthestPageIndex);
   return {
     mode: typeof state.mode === 'string' ? state.mode : null,
     fitMode: typeof state.fitMode === 'string' ? state.fitMode : null,
     zoom: Number.isFinite(zoom) ? zoom : null,
     scrollTop: Number.isFinite(scrollTop) ? scrollTop : 0,
-    scrollRatio: Number.isFinite(scrollRatio) ? scrollRatio : 0
+    scrollRatio: Number.isFinite(scrollRatio) ? scrollRatio : 0,
+    anchorPageIndex: Number.isFinite(anchorPageIndex) ? Math.max(0, Math.floor(anchorPageIndex)) : null,
+    intraPageOffset: Number.isFinite(intraPageOffset) ? Math.max(0, intraPageOffset) : 0,
+    furthestPageIndex: Number.isFinite(furthestPageIndex) ? Math.max(0, Math.floor(furthestPageIndex)) : null
   };
 }
 
@@ -392,7 +424,15 @@ function normalizeView(view = {}) {
     mangaId: typeof view?.mangaId === 'string' && view.mangaId.trim() ? view.mangaId : null,
     chapterId: typeof view?.chapterId === 'string' && view.chapterId.trim() ? view.chapterId : null,
     pageIndex: Number.isFinite(Number(view?.pageIndex)) ? Math.max(0, Math.floor(Number(view.pageIndex))) : 0,
-    readerState: normalizeReaderState(view?.readerState)
+    readerState: normalizeReaderState(view?.readerState),
+    readerIntent: view?.readerIntent && typeof view.readerIntent === 'object'
+      ? {
+          kind: ['normal', 'exact-page', 'restart'].includes(view.readerIntent.kind) ? view.readerIntent.kind : 'normal',
+          pageIndex: Math.max(0, Math.floor(Number(view.readerIntent.pageIndex) || 0)),
+          token: String(view.readerIntent.token || 'restored')
+        }
+      : null,
+    readerNotice: typeof view?.readerNotice === 'string' ? view.readerNotice : null
   };
 }
 
@@ -445,6 +485,10 @@ function normalizeTab(candidate, fallbackIdPrefix = 'restored') {
     id: typeof candidate?.id === 'string' && candidate.id.trim()
       ? candidate.id
       : `${fallbackIdPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    screen: TAB_SCREEN_KEYS.has(String(candidate?.screen || '').trim())
+      ? String(candidate.screen).trim()
+      : 'library',
+    vaultCategoryFilterId: String(candidate?.vaultCategoryFilterId || '').trim() || null,
     pinned: Boolean(candidate?.pinned),
     incognito,
     searchPrivate: false,
@@ -517,7 +561,7 @@ function normalizeSessionState(session, options = {}) {
       .slice(-256)
   );
 
-  if ([2, 3, 4].includes(Number(session?.version)) && Array.isArray(session?.workspaces) && session.workspaces.length > 0) {
+  if ([2, 3, 4, 5, 6, 7, 8].includes(Number(session?.version)) && Array.isArray(session?.workspaces) && session.workspaces.length > 0) {
     const workspaces = session.workspaces
       .slice(0, MAX_WORKSPACES)
       .map((workspace, index) => {
@@ -529,7 +573,7 @@ function normalizeSessionState(session, options = {}) {
       });
 
     return {
-      version: 4,
+      version: 8,
       searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
       workspaces,
       activeWorkspaceId: workspaces.some((workspace) => workspace.id === session?.activeWorkspaceId)
@@ -556,7 +600,7 @@ function normalizeSessionState(session, options = {}) {
   }, 0);
 
   return {
-    version: 4,
+    version: 8,
     searchPrivacyVersion: SEARCH_PRIVACY_VERSION,
     workspaces: [defaultWorkspace],
     activeWorkspaceId: defaultWorkspace.id,
@@ -705,14 +749,23 @@ function normalizeState(state) {
         id: String(category?.id || `category-${index}`),
         path: String(category?.path || '').trim(),
         name: String(category?.name || path.basename(String(category?.path || 'Categorie'))).trim(),
-        hidden: Boolean(category?.hidden)
+        hidden: Boolean(category?.hidden),
+        pathHistory: uniqueStrings([
+          ...(Array.isArray(category?.pathHistory) ? category.pathHistory : []),
+          category?.path
+        ]).slice(-12),
+        availability: ['available', 'missing', 'checking'].includes(category?.availability)
+          ? category.availability
+          : 'available',
+        lastSeenAt: category?.lastSeenAt ? String(category.lastSeenAt) : null,
+        missingSince: category?.missingSince ? String(category.missingSince) : null
       })).filter((category) => category.path)
     : [];
 
   normalized.session = normalizeSessionState(normalized.session, {
     sourceSearchPrivacyVersion: state?.session?.searchPrivacyVersion
   });
-  normalized.session.version = 4;
+  normalized.session.version = 8;
   normalized.scanIndex = normalizeScanIndex(normalized.scanIndex);
   normalized.readingQueue = normalizeQueue(normalized.readingQueue);
   normalized.metadataLocks = normalizeMetadataFieldMap(normalized.metadataLocks);
@@ -768,6 +821,14 @@ function normalizeState(state) {
   normalized.mangaTagMeta = normalized.mangaTagMeta && typeof normalized.mangaTagMeta === 'object' ? normalized.mangaTagMeta : {};
   normalized.annotations = normalized.annotations && typeof normalized.annotations === 'object' ? normalized.annotations : {};
   normalized.metadataWorkbenchQueue = uniqueStrings(normalized.metadataWorkbenchQueue);
+  normalized.metadataWorkbenchItems = normalizeWorkbenchItems(
+    normalized.metadataWorkbenchItems,
+    normalized.metadataWorkbenchQueue
+  );
+  normalized.metadataWorkbenchQueue = normalized.metadataWorkbenchItems.map((item) => item.mangaId);
+  normalized.metadataWorkbenchLastBatch = normalized.metadataWorkbenchLastBatch && typeof normalized.metadataWorkbenchLastBatch === 'object'
+    ? normalized.metadataWorkbenchLastBatch
+    : null;
   normalized.ui = normalized.ui && typeof normalized.ui === 'object' ? normalized.ui : {};
   const requestedTheme = String(normalized.ui.theme || DEFAULT_STATE.ui.theme).trim() || DEFAULT_STATE.ui.theme;
   const requestedInterfaceMode = String(normalized.ui.interfaceMode || '').trim();
@@ -785,6 +846,36 @@ function normalizeState(state) {
   normalized.ui.previewQuality = ['economy', 'balanced', 'high'].includes(String(normalized.ui.previewQuality || '').trim())
     ? String(normalized.ui.previewQuality).trim()
     : DEFAULT_STATE.ui.previewQuality;
+  normalized.ui.sawaExperience = normalized.ui.sawaExperience === 'classic' ? 'classic' : 'horizon';
+  normalized.ui.cinematicBackdrop = normalized.ui.cinematicBackdrop === undefined
+    ? DEFAULT_STATE.ui.cinematicBackdrop
+    : Boolean(normalized.ui.cinematicBackdrop);
+  normalized.ui.cinematicIntensity = Math.min(100, Math.max(0, Number(normalized.ui.cinematicIntensity ?? DEFAULT_STATE.ui.cinematicIntensity) || 0));
+  normalized.ui.foilEnabled = normalized.ui.foilEnabled === undefined
+    ? DEFAULT_STATE.ui.foilEnabled
+    : Boolean(normalized.ui.foilEnabled);
+  normalized.ui.foilIntensity = Math.min(100, Math.max(0, Number(normalized.ui.foilIntensity ?? DEFAULT_STATE.ui.foilIntensity) || 0));
+  normalized.ui.adaptiveVisualEffects = normalized.ui.adaptiveVisualEffects === undefined
+    ? DEFAULT_STATE.ui.adaptiveVisualEffects
+    : Boolean(normalized.ui.adaptiveVisualEffects);
+  normalized.ui.readerFocusMode = normalized.ui.readerFocusMode === 'off' ? 'off' : 'auto';
+  normalized.ui.readerControlsHideMs = Math.min(10000, Math.max(1000, Number(normalized.ui.readerControlsHideMs ?? DEFAULT_STATE.ui.readerControlsHideMs) || 3000));
+  const providerInput = normalized.ui.metadataProviders && typeof normalized.ui.metadataProviders === 'object'
+    ? normalized.ui.metadataProviders
+    : {};
+  const providerEnabledInput = providerInput.enabled && typeof providerInput.enabled === 'object'
+    ? providerInput.enabled
+    : {};
+  normalized.ui.metadataProviders = {
+    enabled: Object.fromEntries(Object.entries(DEFAULT_STATE.ui.metadataProviders.enabled).map(([providerId, fallback]) => [
+      providerId,
+      providerEnabledInput[providerId] === undefined ? fallback : Boolean(providerEnabledInput[providerId])
+    ])),
+    preferredAdultMirror: ['imhentai', 'hentaiera'].includes(providerInput.preferredAdultMirror)
+      ? providerInput.preferredAdultMirror
+      : DEFAULT_STATE.ui.metadataProviders.preferredAdultMirror,
+    allowAdultHtmlFallback: Boolean(providerInput.allowAdultHtmlFallback)
+  };
   const allowedSidebarSections = new Set(DEFAULT_SIDEBAR_SECTIONS);
   const rawSidebarSections = Array.isArray(normalized.ui.sidebarSections)
     ? normalized.ui.sidebarSections
@@ -917,6 +1008,38 @@ function normalizeState(state) {
           })
           .filter(Boolean)
       )
+    : {};
+  normalized.relocationJournal = (Array.isArray(normalized.relocationJournal) ? normalized.relocationJournal : [])
+    .filter((entry) => entry && typeof entry === 'object' && entry.id && entry.entityId)
+    .map((entry) => ({
+      ...entry,
+      id: String(entry.id),
+      kind: entry.kind === 'manga' ? 'manga' : 'category',
+      entityId: String(entry.entityId),
+      fromPath: String(entry.fromPath || ''),
+      toPath: String(entry.toPath || ''),
+      appliedAt: String(entry.appliedAt || new Date().toISOString()),
+      undoUntil: String(entry.undoUntil || entry.appliedAt || new Date().toISOString()),
+      undoneAt: entry.undoneAt ? String(entry.undoneAt) : null
+    }))
+    .filter((entry) => Date.now() - Date.parse(entry.appliedAt) <= 30 * 24 * 60 * 60 * 1000)
+    .slice(-50);
+  normalized.progress = normalized.progress && typeof normalized.progress === 'object' && !Array.isArray(normalized.progress)
+    ? Object.fromEntries(Object.entries(normalized.progress).map(([chapterId, progress]) => {
+        const source = progress && typeof progress === 'object' ? progress : {};
+        const pageIndex = Math.max(0, Math.floor(Number(source.pageIndex) || 0));
+        return [chapterId, {
+          ...source,
+          pageIndex,
+          furthestPageIndex: Math.max(pageIndex, Math.floor(Number(source.furthestPageIndex) || 0)),
+          anchorPageIndex: Number.isFinite(Number(source.anchorPageIndex))
+            ? Math.max(0, Math.floor(Number(source.anchorPageIndex)))
+            : pageIndex,
+          intraPageOffset: Number.isFinite(Number(source.intraPageOffset))
+            ? Math.max(0, Number(source.intraPageOffset))
+            : 0
+        }];
+      }))
     : {};
   const identityNow = new Date().toISOString();
   normalized.identitySuggestions = (Array.isArray(normalized.identitySuggestions) ? normalized.identitySuggestions : [])
@@ -1415,7 +1538,7 @@ function createBackup(label = '') {
   const backupPath = path.join(getBackupDir(), fileName);
   const manifest = {
     app: 'sawa-manga-library',
-    version: '4.1.0',
+    version: '5.0.1',
     storageVersion: STORAGE_VERSION,
     stateVersion: STATE_VERSION,
     scanIndexVersion: SCAN_INDEX_VERSION,
@@ -1447,7 +1570,7 @@ async function exportBackup(targetPath, label = '') {
     targetPath,
     state: loadState(),
     managedCoverDir: getManagedCoverDir(),
-    appVersion: '4.1.0',
+    appVersion: '5.0.1',
     storageVersion: STORAGE_VERSION,
     stateVersion: STATE_VERSION,
     label
@@ -1745,6 +1868,96 @@ function sanitizeCollectionPatch(patch) {
     next.appearance = normalizeCollectionAppearance(source.appearance);
   }
   return next;
+}
+
+const WORKBENCH_STATUSES = new Set([
+  'pending',
+  'analyzing',
+  'reliable',
+  'review',
+  'no-result',
+  'error',
+  'done',
+  'interrupted'
+]);
+
+function normalizeWorkbenchCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  const identity = String(candidate.identity || `${candidate.source || ''}:${candidate.sourceId || ''}`).trim();
+  if (!identity) return null;
+  return {
+    identity,
+    source: String(candidate.source || '').trim(),
+    sourceLabel: String(candidate.sourceLabel || candidate.source || '').trim(),
+    sourceId: String(candidate.sourceId || '').trim(),
+    title: String(candidate.title || '').trim(),
+    titleEnglish: String(candidate.titleEnglish || '').trim() || null,
+    titleJapanese: String(candidate.titleJapanese || '').trim() || null,
+    altTitles: uniqueStrings(candidate.altTitles).slice(0, 30),
+    synopsis: String(candidate.synopsis || '').trim() || null,
+    authors: String(candidate.authors || '').trim(),
+    tags: uniqueStrings(candidate.tags || candidate.genres).slice(0, 60),
+    reasons: uniqueStrings(candidate.reasons).slice(0, 10),
+    confidence: Number.isFinite(Number(candidate.confidence)) ? Math.max(0, Math.min(1, Number(candidate.confidence))) : null,
+    pages: Number.isFinite(Number(candidate.pages)) ? Number(candidate.pages) : null,
+    chapters: Number.isFinite(Number(candidate.chapters)) ? Number(candidate.chapters) : null,
+    coverUrl: String(candidate.coverUrl || candidate.coverDownloadUrl || '').trim() || null,
+    coverPreviewUrl: String(candidate.coverPreviewUrl || candidate.coverUrl || '').trim() || null,
+    type: String(candidate.type || candidate.format || '').trim() || null,
+    mangaDexId: String(candidate.mangaDexId || '').trim() || null,
+    anilistId: String(candidate.anilistId || '').trim() || null,
+    nhentaiId: String(candidate.nhentaiId || '').trim() || null,
+    malId: Number.isFinite(Number(candidate.malId)) ? Number(candidate.malId) : null,
+    hydrated: Boolean(candidate.hydrated)
+  };
+}
+
+function normalizeWorkbenchItems(items, queueIds = []) {
+  const byId = new Map();
+  (Array.isArray(items) ? items : []).forEach((item, index) => {
+    const mangaId = String(item?.mangaId || item?.id || '').trim();
+    if (!mangaId || byId.has(mangaId)) return;
+    const requestedStatus = String(item?.status || 'pending').trim();
+    const status = requestedStatus === 'analyzing'
+      ? 'interrupted'
+      : (WORKBENCH_STATUSES.has(requestedStatus) ? requestedStatus : 'pending');
+    byId.set(mangaId, {
+      mangaId,
+      order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
+      status,
+      confidence: Number.isFinite(Number(item?.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 0,
+      margin: Number.isFinite(Number(item?.margin)) ? Math.max(0, Math.min(1, Number(item.margin))) : 0,
+      candidate: normalizeWorkbenchCandidate(item?.candidate),
+      candidateCount: Math.max(0, Number(item?.candidateCount || 0)),
+      fields: uniqueStrings(item?.fields).slice(0, 40),
+      error: String(item?.error || '').trim() || null,
+      decision: ['accepted', 'keep-local'].includes(String(item?.decision || '').trim()) ? String(item.decision).trim() : null,
+      reviewedAt: String(item?.reviewedAt || '').trim() || null,
+      updatedAt: String(item?.updatedAt || new Date().toISOString()),
+      jobId: String(item?.jobId || '').trim() || null
+    });
+  });
+  uniqueStrings(queueIds).forEach((mangaId, index) => {
+    if (byId.has(mangaId)) return;
+    byId.set(mangaId, {
+      mangaId,
+      order: index,
+      status: 'pending',
+      confidence: 0,
+      margin: 0,
+      candidate: null,
+      candidateCount: 0,
+      fields: [],
+      error: null,
+      decision: null,
+      reviewedAt: null,
+      updatedAt: new Date().toISOString(),
+      jobId: null
+    });
+  });
+  return [...byId.values()]
+    .sort((left, right) => left.order - right.order)
+    .map((item, index) => ({ ...item, order: index }));
 }
 
 function updateCollection(collectionId, patch) {

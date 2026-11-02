@@ -12,7 +12,7 @@ export function ExistingInstallModal({
     <Modal
       kind="info"
       title="Une version de Sawa est déjà installée"
-      sub={`v${version || '3.x.x'} → v4.0.0 · Le Carnet de Sawa`}
+      sub={`v${version || '3.x.x'} → v5.0.1 · Sawa Horizon`}
       footer={
         <>
           <button className="btn" onClick={onCancel}>

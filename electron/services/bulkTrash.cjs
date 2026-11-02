@@ -243,6 +243,12 @@ function removeDeletedMangaState(state, manga, tombstone) {
   state.recents = (state.recents || []).filter((entry) => entry?.mangaId !== mangaId);
   state.readingQueue = (state.readingQueue || []).filter((entry) => entry?.mangaId !== mangaId);
   state.metadataWorkbenchQueue = (state.metadataWorkbenchQueue || []).filter((id) => id !== mangaId);
+  state.metadataWorkbenchItems = (state.metadataWorkbenchItems || []).filter((item) => item?.mangaId !== mangaId);
+  if (Array.isArray(state.metadataWorkbenchLastBatch?.entries)) {
+    state.metadataWorkbenchLastBatch.entries = state.metadataWorkbenchLastBatch.entries
+      .filter((entry) => entry?.mangaId !== mangaId);
+    if (state.metadataWorkbenchLastBatch.entries.length === 0) state.metadataWorkbenchLastBatch = null;
+  }
   return state;
 }
 

@@ -96,8 +96,8 @@ async function exportBackupPackage(options = {}) {
     const manifest = {
       format: PACKAGE_FORMAT,
       packageVersion: PACKAGE_VERSION,
-      appVersion: String(options.appVersion || '4.1.0'),
-      storageVersion: Number(options.storageVersion || 4),
+      appVersion: String(options.appVersion || '5.0.1'),
+      storageVersion: Number(options.storageVersion || 5),
       stateVersion: Number(options.stateVersion || 4),
       createdAt: new Date().toISOString(),
       label: String(options.label || 'Export manuel').slice(0, 120),

@@ -1,6 +1,6 @@
 ;!@Install@!UTF-8!
 Title="Sawa Manga Library — Setup"
-BeginPrompt="Préparation de l'installateur de Sawa Manga Library v4.0.0…"
+BeginPrompt="Préparation de l'installateur de Sawa Manga Library v5.0.1…"
 RunProgram="installer-ui.exe"
 GUIFlags="64+8"
 GUIMode="2"

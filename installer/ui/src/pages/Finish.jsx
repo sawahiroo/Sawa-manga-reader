@@ -66,7 +66,7 @@ export function FinishPage({ state, dispatch }) {
           .
         </h1>
 
-        <div className="rule-ornament">✦ v 4.0.0 · midnight ember ✦</div>
+        <div className="rule-ornament">✦ v 5.0.1 · sawa horizon ✦</div>
 
         <p
           style={{

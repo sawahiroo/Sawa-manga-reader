@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles/globals.css';
+import './styles/horizon.css';
 import { shouldEscalateUnhandledRejection } from './utils/fatalErrors.js';
 
 function normalizeErrorMessage(errorLike) {

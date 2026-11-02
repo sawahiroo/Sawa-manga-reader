@@ -4,6 +4,7 @@ import {
   getSelectionSession,
   getSelectionSummary,
   makeSelectionSessionKey,
+  resolveMangaSelectionIntent,
   selectionSessionsReducer
 } from '../src/utils/selectionSessions.js';
 
@@ -55,5 +56,24 @@ describe('selection sessions', () => {
       { type: 'toggle', key, id: 'b', orderedIds: ['b', 'a'] }
     ]);
     expect(new Set(getSelectionSession(state, key).selectedIds)).toEqual(new Set(['a', 'b']));
+  });
+
+  it('normalizes numeric and padded identifiers at every controller boundary', () => {
+    const key = 'sawa:vault:all';
+    const state = reduce([
+      { type: 'toggle', key, id: 42, orderedIds: [41, 42, ' 43 '] },
+      { type: 'toggle', key, id: ' 43 ', shiftKey: true, orderedIds: [41, 42, ' 43 '] }
+    ]);
+    expect(getSelectionSession(state, key).selectedIds).toEqual(['42', '43']);
+    expect(getSelectionSummary(getSelectionSession(state, key), [42, 43]).hiddenCount).toBe(0);
+  });
+
+  it('centralizes card click, modifier and middle-click intentions', () => {
+    expect(resolveMangaSelectionIntent({ button: 0 }, false)).toBe('open');
+    expect(resolveMangaSelectionIntent({ button: 0, ctrlKey: true }, false)).toBe('toggle-selection');
+    expect(resolveMangaSelectionIntent({ button: 0, shiftKey: true }, false)).toBe('toggle-selection');
+    expect(resolveMangaSelectionIntent({ button: 0 }, true)).toBe('toggle-selection');
+    expect(resolveMangaSelectionIntent({ button: 1 }, false)).toBe('open-background');
+    expect(resolveMangaSelectionIntent({ button: 1 }, true)).toBe('ignore');
   });
 });

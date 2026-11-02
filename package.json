@@ -1,6 +1,6 @@
 {
   "name": "sawa-manga-library",
-  "version": "4.1.0",
+  "version": "5.0.1",
   "description": "Bibliothèque manga locale premium — Electron + React + Vite",
   "main": "electron/main.cjs",
   "type": "module",
@@ -12,16 +12,14 @@
     "test:watch": "vitest",
     "test:e2e": "npm run build:web && playwright test --config=playwright.electron.config.js",
     "test:perf": "npm run build:web && playwright test --config=playwright.perf.config.js",
+    "test:metadata-canary": "node scripts/metadata-provider-canary.cjs",
     "start:prod": "npm run build:web && electron .",
     "preview:web": "vite preview",
     "pack:dir": "npm run build:web && electron-builder --dir",
     "dist:exe": "npm run build:web && electron-builder --win nsis",
     "dist:msi": "npm run build:web && electron-builder --win msi",
     "dist:portable": "npm run build:web && electron-builder --win portable",
-    "dist:win": "npm run build:web && electron-builder --win nsis msi",
-    "dev:installer": "vite -c vite.installer.config.js",
-    "build:installer-ui": "vite build -c vite.installer.config.js",
-    "dist:installer": "node scripts/build-installer.mjs"
+    "dist:win": "npm run build:web && electron-builder --win nsis msi"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -87,11 +85,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh",
-      "license": "build/license-fr.txt",
-      "installerSidebar": "build/nsis-midnight-sidebar.bmp",
-      "uninstallerSidebar": "build/nsis-midnight-sidebar.bmp",
-      "installerHeader": "build/nsis-midnight-header.bmp",
+      "artifactName": "Sawa-Setup-${version}.${ext}",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Sawa Manga Library",

@@ -77,6 +77,52 @@ test('les recherches incognito ne persistent ni requete ni historique', async ()
   }
 });
 
+test('Sawa selectionne vraiment les cartes privees dans un Coffre virtualise', async () => {
+  const profile = createIsolatedProfile({
+    interfaceMode: 'sawa',
+    mangaCount: 500,
+    vaultUnlocked: true,
+    vaultMangaCount: 320
+  });
+  let running = null;
+  try {
+    running = await launchSawa(profile);
+    const { page } = running;
+    await page.locator('.sawa-sidebar-nav-menu .ps-menu-button').filter({ hasText: /Coffre/i }).click();
+    const vault = page.locator('.vault-view');
+    await expect(vault).toBeVisible();
+    await vault.getByRole('button', { name: /Selection multiple/i }).click();
+    const first = vault.locator('[data-manga-id]').first();
+    await first.click({ position: { x: 70, y: 120 } });
+    const toolbar = page.getByRole('toolbar', { name: 'Actions sur la selection' });
+    await expect(toolbar).toContainText('1 selection');
+    await expect(first).toHaveAttribute('aria-selected', 'true');
+
+    const checkbox = first.getByRole('checkbox');
+    await checkbox.uncheck();
+    await expect(toolbar).toContainText('0 selection');
+    await first.focus();
+    await page.keyboard.press('Space');
+    await expect(toolbar).toContainText('1 selection');
+    const firstId = await first.getAttribute('data-manga-id');
+    await toolbar.getByRole('button', { name: 'Favori', exact: true }).click();
+    await expect.poll(async () => {
+      const snapshot = await page.evaluate(() => window.mangaAPI.bootstrap());
+      return Boolean(snapshot.persisted.favorites[firstId]);
+    }).toBe(true);
+    await expect(toolbar).toBeVisible();
+
+    await scrollToStableOffset(page, '.vault-grid-virtual', 3200);
+    const far = vault.locator('[data-manga-id]').last();
+    await far.click({ modifiers: ['Shift'], position: { x: 70, y: 120 } });
+    const count = Number.parseInt(await toolbar.locator('.bulk-action-copy-badge').innerText(), 10);
+    expect(count).toBeGreaterThan(5);
+  } finally {
+    await running?.application?.close().catch(() => {});
+    await removeIsolatedProfile(profile);
+  }
+});
+
 for (const interfaceMode of ['sawa', 'kavita']) {
   test(`${interfaceMode} selection Ctrl Maj virtualisee filtre onglet action et annulation`, async () => {
     const profile = createIsolatedProfile({ interfaceMode });

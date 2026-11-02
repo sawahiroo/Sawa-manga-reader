@@ -12,8 +12,8 @@ describe('storage v4 identity migration', () => {
       session: { version: 3, tabs: [], scrollPositions: {} }
     });
     expect(migrated).toMatchObject({
-      version: 4,
-      stateVersion: 4,
+      version: 7,
+      stateVersion: 7,
       identityRecords: {},
       identitySuggestions: [],
       identityMediaIssues: [],

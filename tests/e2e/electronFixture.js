@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
 
@@ -36,7 +37,7 @@ export function makeFixtureId(prefix, absolutePath) {
 
 function buildTestSession({ incognito = false } = {}) {
   return {
-    version: 4,
+    version: 5,
     searchPrivacyVersion: 1,
     activeWorkspaceId: 'e2e-workspace',
     workspaces: [{
@@ -57,10 +58,55 @@ function buildTestSession({ incognito = false } = {}) {
   };
 }
 
-const FIXTURE_PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZqZsAAAAASUVORK5CYII=',
-  'base64'
-);
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data = Buffer.alloc(0)) {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, checksum]);
+}
+
+function createFixturePng(seed = 0) {
+  const width = 48;
+  const height = 72;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  const baseHue = (Number(seed) * 37) % 180;
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (width * 4 + 1);
+    raw[rowOffset] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const offset = rowOffset + 1 + (x * 4);
+      const panel = ((x >> 3) + (y >> 3)) % 2;
+      raw[offset] = Math.min(245, 64 + baseHue + panel * 42);
+      raw[offset + 1] = Math.min(245, 88 + ((seed * 19 + y * 2) % 120));
+      raw[offset + 2] = Math.min(245, 118 + ((seed * 13 + x * 3) % 110));
+      raw[offset + 3] = 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: 6 })),
+    pngChunk('IEND')
+  ]);
+}
 
 function createSeedLibrary(profileRoot, mangaCount = 84) {
   const libraryRoot = path.join(profileRoot, 'fixture-library');
@@ -83,10 +129,9 @@ function createSeedLibrary(profileRoot, mangaCount = 84) {
       const chapterPath = path.join(mangaPath, `Chapitre ${String(chapterIndex + 1).padStart(2, '0')}`);
       fs.mkdirSync(chapterPath, { recursive: true });
       for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-        const identitySuffix = Buffer.from(`sawa-e2e:${index}:${chapterIndex}:${pageIndex}`, 'utf8');
         fs.writeFileSync(
           path.join(chapterPath, `${String(pageIndex + 1).padStart(3, '0')}.png`),
-          Buffer.concat([FIXTURE_PNG, identitySuffix])
+          createFixturePng((index * 97) + (chapterIndex * 17) + pageIndex)
         );
       }
       chapterPaths.push(chapterPath);
@@ -105,7 +150,7 @@ function createSeedLibrary(profileRoot, mangaCount = 84) {
   return { libraryRoot, mangas };
 }
 
-function buildSeedState(profileRoot, { interfaceMode, diagnostics, incognito = false, mangaCount = 84 }) {
+function buildSeedState(profileRoot, { interfaceMode, diagnostics, theme = 'dark-night', incognito = false, mangaCount = 84, vaultUnlocked = false, vaultMangaCount = 1, workbenchMangaCount = 0, workbenchReviewCount = 0 }) {
   const { libraryRoot, mangas } = createSeedLibrary(profileRoot, mangaCount);
   const first = mangas[0];
   const second = mangas[1];
@@ -130,8 +175,8 @@ function buildSeedState(profileRoot, { interfaceMode, diagnostics, incognito = f
   const tagId = 'tag-e2e';
   const now = new Date().toISOString();
   return {
-    version: 4,
-    stateVersion: 4,
+    version: 5,
+    stateVersion: 5,
     scanIndexVersion: 1,
     queueVersion: 1,
     metadataVersion: 1,
@@ -145,6 +190,7 @@ function buildSeedState(profileRoot, { interfaceMode, diagnostics, incognito = f
     session: buildTestSession({ incognito }),
     ui: {
       interfaceMode,
+      theme,
       kavitaUpgradePromptSeen: true,
       activeScreen: 'library',
       selectedCategoryId: null,
@@ -196,18 +242,47 @@ function buildSeedState(profileRoot, { interfaceMode, diagnostics, incognito = f
     },
     smartCollections: {},
     annotations: {},
-    metadataWorkbenchQueue: [],
+    metadataWorkbenchQueue: mangas.slice(0, workbenchMangaCount).map((manga) => manga.id),
+    metadataWorkbenchItems: mangas.slice(0, workbenchMangaCount).map((manga, order) => ({
+      mangaId: manga.id,
+      order,
+      status: order < workbenchReviewCount ? 'review' : 'pending',
+      confidence: order < workbenchReviewCount ? 0.78 : 0,
+      margin: order < workbenchReviewCount ? 0.04 : 0,
+      candidate: order < workbenchReviewCount ? {
+        identity: `fixture:${order + 1}`,
+        source: 'fixture',
+        sourceLabel: 'Catalogue fixture',
+        sourceId: String(order + 1),
+        title: `Proposition distante ${String(order + 1).padStart(3, '0')}`,
+        authors: `Auteur ${order % 7}`,
+        pages: 4,
+        tags: ['Test', 'Vérification'],
+        reasons: ['near-title', 'author'],
+        confidence: 0.78,
+        coverUrl: null,
+        coverPreviewUrl: null
+      } : null,
+      candidateCount: order < workbenchReviewCount ? 3 : 0,
+      fields: [],
+      error: null,
+      jobId: null,
+      updatedAt: now
+    })),
+    metadataWorkbenchLastBatch: null,
     readingQueue: [],
     plugins: { enabled: {}, dismissedWarnings: {} },
     vault: {
       pinHash: 'fixture-pin-hash',
       pinProtectedBlob: null,
       securityMode: 'basic',
-      locked: true,
+      locked: !vaultUnlocked,
       blurCovers: true,
       autoLockOnClose: true,
       stealthMode: false,
-      privateMangaIds: [secret.id],
+      privateMangaIds: vaultMangaCount > 0
+        ? mangas.slice(2, 2 + Math.min(mangas.length - 2, vaultMangaCount)).map((manga) => manga.id)
+        : [],
       privateCategoryIds: []
     },
     readingStates: {},
@@ -306,16 +381,21 @@ function createRepresentativeProfile({ interfaceMode, diagnostics }) {
 export function createIsolatedProfile({
   interfaceMode = 'sawa',
   diagnostics = false,
+  theme = 'dark-night',
   representative = false,
   incognito = false,
-  mangaCount = 84
+  mangaCount = 84,
+  vaultUnlocked = false,
+  vaultMangaCount = 1,
+  workbenchMangaCount = 0,
+  workbenchReviewCount = 0
 } = {}) {
   if (representative) {
     const representativeProfile = createRepresentativeProfile({ interfaceMode, diagnostics });
     if (representativeProfile) return representativeProfile;
   }
   const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sawa-e2e-'));
-  const state = buildSeedState(profileRoot, { interfaceMode, diagnostics, incognito, mangaCount });
+  const state = buildSeedState(profileRoot, { interfaceMode, diagnostics, theme, incognito, mangaCount, vaultUnlocked, vaultMangaCount, workbenchMangaCount, workbenchReviewCount });
   fs.writeFileSync(path.join(profileRoot, 'state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   return profileRoot;
 }
@@ -374,15 +454,24 @@ export async function launchSawa(profileRoot, extraEnv = {}) {
     throw new Error('Fenetre principale Electron introuvable.');
   }
 
+  const interfaceRoot = page.locator('.app-shell, .kv-app').first();
   try {
-    await page.locator('.app-shell, .kv-app').first().waitFor({ state: 'visible', timeout: 20_000 });
+    await interfaceRoot.waitFor({ state: 'visible', timeout: 20_000 });
   } catch (error) {
     const bodyText = await page.locator('body').innerText().catch(() => '');
     const bodyHtml = await page.locator('body').innerHTML().catch(() => '');
     await application.close().catch(() => {});
     throw new Error(`Interface Sawa absente: ${bodyText.slice(0, 1200)}\nHTML: ${bodyHtml.slice(0, 1200)}`, { cause: error });
   }
-  const librarySelector = await page.locator('.library-view').count() ? '.library-view' : '.kv-scroll-region';
+  const isSawaInterface = await interfaceRoot.evaluate((node) => node.classList.contains('app-shell'));
+  const librarySelector = isSawaInterface ? '.library-view' : '.kv-scroll-region';
+  if (!await page.locator(librarySelector).isVisible()) {
+    const libraryNavigation = isSawaInterface
+      ? page.getByText('Bibliotheque', { exact: true }).first()
+      : page.getByText('Toutes les series', { exact: true }).first();
+    await libraryNavigation.waitFor({ state: 'visible', timeout: 20_000 });
+    await libraryNavigation.click();
+  }
   await page.locator(librarySelector).waitFor({ state: 'visible', timeout: 20_000 });
   await page.locator(`${librarySelector} [data-manga-id]`).first().waitFor({ state: 'visible', timeout: 20_000 });
   return {

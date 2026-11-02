@@ -1,5 +1,11 @@
 # Third-Party Notices
 
+## Geist
+
+Copyright (c) 2023 Vercel, in collaboration with basement.studio.
+
+Geist is distributed under the SIL Open Font License 1.1. The complete license is included at `src/assets/fonts/Geist-LICENSE.txt`.
+
 This project includes or integrates with third-party open-source software. Package versions are resolved by `package-lock.json` and `installer/package-lock.json`.
 
 ## Runtime And Application Dependencies

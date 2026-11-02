@@ -181,7 +181,9 @@ describe('secure bulk trash', () => {
       collections: { c: { id: 'c', mangaIds: ['a'] } },
       recents: [],
       readingQueue: [],
-      metadataWorkbenchQueue: []
+      metadataWorkbenchQueue: ['a'],
+      metadataWorkbenchItems: [{ mangaId: 'a', status: 'review' }],
+      metadataWorkbenchLastBatch: { entries: [{ mangaId: 'a', previous: {} }] }
     };
     const tombstone = service.createDeletionTombstone(state, mangas[0], 1000);
     expect(Object.keys(tombstone).sort()).toEqual([
@@ -196,6 +198,9 @@ describe('secure bulk trash', () => {
     service.removeDeletedMangaState(state, mangas[0], tombstone);
     expect(state.metadata.a).toBeUndefined();
     expect(state.deletionTombstones.a).toBeTruthy();
+    expect(state.metadataWorkbenchQueue).toEqual([]);
+    expect(state.metadataWorkbenchItems).toEqual([]);
+    expect(state.metadataWorkbenchLastBatch).toBeNull();
 
     state.progress['a-ch'] = { pageIndex: 11 };
     state.readingStates.a = { chapterId: 'a-ch', pageIndex: 11 };
