@@ -241,28 +241,41 @@ export function restoreReaderProgressSnapshot(payload, snapshot) {
 export function applyReaderProgressMutation(payload, progressPayload, options = {}) {
   if (!payload || !progressPayload?.chapterId || !progressPayload?.mangaId) return payload;
   const now = options.now || new Date().toISOString();
+  const persistedPrevious = payload?.persisted?.progress?.[progressPayload.chapterId] || null;
+  const mergedProgress = {
+    ...(persistedPrevious || {}),
+    ...progressPayload,
+    pageIndex: Math.max(0, Number(progressPayload.pageIndex) || 0),
+    furthestPageIndex: Math.max(
+      Number(persistedPrevious?.furthestPageIndex ?? persistedPrevious?.pageIndex) || 0,
+      Number(progressPayload.furthestPageIndex ?? progressPayload.pageIndex) || 0
+    ),
+    lastReadAt: now
+  };
+  const threshold = Number(payload?.persisted?.ui?.autoMarkReadThreshold ?? 95);
+  const reachedThreshold = Number(mergedProgress.pageCount) > 0
+    && (((mergedProgress.furthestPageIndex + 1) / mergedProgress.pageCount) * 100) >= threshold;
   const changed = updatePayloadManga(payload, progressPayload.mangaId, (manga) => {
     const chapters = (manga.chapters || []).map((chapter) => {
       if (!matchesReference(chapter, progressPayload.chapterId)) return chapter;
+      const isRead = Boolean(chapter.isRead || chapter.readingState === 'read' || reachedThreshold);
       return {
         ...chapter,
-        progress: { ...progressPayload, lastReadAt: now },
-        isRead: progressPayload.pageCount > 0 && progressPayload.pageIndex >= progressPayload.pageCount - 1,
-        readingState: progressPayload.pageCount > 0 && progressPayload.pageIndex >= progressPayload.pageCount - 1
-          ? 'read'
-          : 'in-progress'
+        progress: mergedProgress,
+        isRead,
+        readingState: isRead ? 'read' : 'in-progress'
       };
     });
     return {
       ...recomputeMangaProgress(manga, chapters),
-      lastProgress: { ...progressPayload, lastReadAt: now },
+      lastProgress: mergedProgress,
       lastReadAt: now
     };
   });
   const clean = withoutMutationMetadata(changed);
   const progress = {
     ...(clean?.persisted?.progress || {}),
-    [progressPayload.chapterId]: { ...progressPayload, lastReadAt: now }
+    [progressPayload.chapterId]: mergedProgress
   };
   const recents = [
     {

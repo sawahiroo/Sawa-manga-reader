@@ -64,7 +64,7 @@ function TopBar({
         <button className="icon-pill topbar-sidebar-toggle" onClick={onToggleSidebar} title={sidebarCollapsed ? 'Deplier la barre laterale' : 'Replier la barre laterale'}>
           {sidebarCollapsed ? <PanelExpandIcon size={16} /> : <PanelCollapseIcon size={16} />}
         </button>
-        <div>
+        <div className="topbar-copy">
           <div className="page-title">{title}</div>
           <div className="page-subtitle">{subtitle}</div>
         </div>

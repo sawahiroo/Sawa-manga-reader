@@ -164,7 +164,7 @@ export function IllustrationPanel({ variant = 'welcome' }) {
           opacity: 0.85,
         }}
       >
-        Midnight Ember · v4.0.0
+        Sawa Horizon · v5.0.1
       </div>
     </div>
   );

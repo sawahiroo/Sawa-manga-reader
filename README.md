@@ -4,13 +4,19 @@ Sawa Manga Library est une application Windows locale pour lire, organiser et en
 
 [Télécharger les releases officielles](https://github.com/tsukihiro-nomel/Sawa-manga-reader/releases)
 
-> Le dépôt prépare la version `4.0.0`. La release publique actuellement disponible peut encore correspondre à une version antérieure. Pour la v4, l'installateur attendu est `Sawa-Setup-4.0.0.exe`.
+> Le dépôt prépare la version `5.0.1`. La release publique actuellement disponible peut encore correspondre à une version antérieure. Pour la v5.0.1, l'installateur attendu est `Sawa-Setup-5.0.1.exe`.
 
 ## Aperçu
 
+### Interface Sawa Horizon
+
+Sawa Horizon est l'interface par défaut. Elle conserve les repères historiques de Sawa avec une bibliothèque cinématique, des cartes de collection et le lecteur Focus. L'interface Sawa classique reste disponible dans les paramètres pendant la version 5.0.
+
+![Bibliothèque Sawa Horizon](docs/design/sawa-5/library-horizon.png)
+
 ### Interface Kavita
 
-L'interface Kavita est utilisée par défaut sur les nouvelles installations. Elle privilégie une navigation classique, dense et légère.
+L'interface Kavita reste disponible sans changement visuel. Elle privilégie une navigation classique, dense et légère.
 
 ![Bibliothèque Sawa avec l'interface Kavita](docs/screenshots/kavita-library.png)
 
@@ -26,9 +32,9 @@ Le lecteur Kavita utilise un canvas noir plein écran, une barre d'onglets compa
 
 ![Lecteur manga de Sawa](docs/screenshots/kavita-reader.png)
 
-### Interface Sawa
+### Interface Sawa classique
 
-L'interface historique Sawa reste disponible. Elle propose une présentation plus visuelle avec dashboard, carrousels et cartes enrichies.
+L'interface historique Sawa reste disponible comme solution de secours pendant la version 5.0.
 
 ![Bibliothèque avec l'interface Sawa](docs/screenshots/sawa-library.png)
 
@@ -100,7 +106,7 @@ Règles principales:
 ### 1. Télécharger Sawa
 
 1. Ouvrez la page des [releases officielles](https://github.com/tsukihiro-nomel/Sawa-manga-reader/releases).
-2. Pour la future release v4, téléchargez `Sawa-Setup-4.0.0.exe`.
+2. Pour la future release v4.2, téléchargez `Sawa-Setup-4.2.0.exe`.
 3. Fermez une éventuelle instance de Sawa avant de lancer l'installation ou la mise à jour.
 
 ### 2. Avertissement SmartScreen
@@ -385,42 +391,39 @@ npm run dev
 ```bash
 npm test
 npm run build:web
-npm run build:installer-ui
 ```
 
-### Installateur Officiel
+### Installateur Windows
 
 ```bash
-npm run dist:installer
+npm run dist:exe
 ```
 
 L'artefact final est produit dans:
 
 ```text
-release-installer/Sawa-Setup-4.0.0.exe
+release/Sawa-Setup-<version>.exe
 ```
 
-Le script construit successivement le backend NSIS, l'interface Electron de l'installateur et le wrapper final.
+La release utilise désormais directement l'assistant NSIS standard d'Electron Builder. L'ancien installateur Electron/NSIS personnalisé situé dans `installer/` est conservé uniquement comme code historique et ne fait plus partie du build officiel.
 
-### Builds Alternatifs
+### Autres formats
 
 ```bash
 npm run pack:dir
-npm run dist:exe
 npm run dist:msi
 npm run dist:portable
 npm run dist:win
 ```
 
-Ces sorties Electron Builder utilisent principalement `release/` et restent des alternatives au parcours `dist:installer`.
+Toutes les sorties Electron Builder sont placées dans `release/`.
 
 ## Validation Avant Release
 
 ```bash
 npm test
 npm run build:web
-npm run build:installer-ui
-npm run dist:installer
+npm run dist:exe
 ```
 
 Vérifications manuelles recommandées:

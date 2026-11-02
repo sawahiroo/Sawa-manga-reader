@@ -187,3 +187,54 @@ test('les suggestions et l entree en selection restent sous 100 ms au p95', asyn
     await removeIsolatedProfile(profile);
   }
 });
+
+test('la selection du Coffre reste sous 100 ms au p95 avec 500 oeuvres', async () => {
+  const profile = createIsolatedProfile({
+    interfaceMode: 'sawa',
+    diagnostics: true,
+    mangaCount: 500,
+    vaultUnlocked: true,
+    vaultMangaCount: 320
+  });
+  let running = null;
+  try {
+    running = await launchSawa(profile);
+    const { page } = running;
+    await page.locator('.sawa-sidebar-nav-menu .ps-menu-button').filter({ hasText: /Coffre/i }).click();
+    await expect(page.locator('.vault-view')).toBeVisible();
+    await page.locator('.vault-view').getByRole('button', { name: /Selection multiple/i }).click();
+    const result = await page.evaluate(async () => {
+      const waitFor = async (predicate, timeoutMs = 2_000) => {
+        const startedAt = performance.now();
+        while (!predicate()) {
+          if (performance.now() - startedAt > timeoutMs) throw new Error('Attente selection Coffre expiree');
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+      };
+      const durations = [];
+      for (let index = 0; index < 40; index += 1) {
+        const card = document.querySelector('.vault-view [data-manga-id]');
+        if (!(card instanceof HTMLElement)) throw new Error('Carte privee introuvable');
+        const before = card.getAttribute('aria-selected');
+        const startedAt = performance.now();
+        card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 70, clientY: 120 }));
+        await waitFor(() => card.getAttribute('aria-selected') !== before);
+        durations.push(performance.now() - startedAt);
+      }
+      const stats = await window.mangaAPI.getStats({ includeDiagnostics: true });
+      return { durations, measurements: stats?.diagnostics?.measurements || [] };
+    });
+    const selectionP95 = percentile95(result.durations);
+    const unresponsive = result.measurements.filter((item) => item.kind === 'renderer.unresponsive');
+    console.log(`SAWA_VAULT_SELECTION_RESULT=${JSON.stringify({
+      p95Ms: Math.round(selectionP95),
+      samples: result.durations.length,
+      unresponsive: unresponsive.length
+    })}`);
+    expect(selectionP95).toBeLessThanOrEqual(100);
+    expect(unresponsive).toHaveLength(0);
+  } finally {
+    await running?.application?.close().catch(() => {});
+    await removeIsolatedProfile(profile);
+  }
+});

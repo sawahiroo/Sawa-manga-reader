@@ -1348,7 +1348,7 @@ async function fetchJson(url) {
   const response = await fetch(url, {
     headers: {
       Accept: 'application/json',
-      'User-Agent': 'Sawa Manga Library/4.0.0'
+      'User-Agent': 'Sawa Manga Library/5.0.1'
     }
   });
   if (!response.ok) {

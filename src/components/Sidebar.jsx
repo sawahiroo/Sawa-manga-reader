@@ -200,6 +200,7 @@ function Sidebar({
   onAddCategories,
   onToggleCategoryHidden,
   onRemoveCategory,
+  onRelinkCategory,
   onOpenSettings,
   onContextMenu,
   favoritesCount = 0,
@@ -339,6 +340,7 @@ function Sidebar({
                         key={item.id}
                         active={active}
                         icon={item.icon({ active })}
+                        title={collapsed ? item.label : undefined}
                         suffix={!collapsed && badge > 0 ? <span className="sidebar-badge">{badge}</span> : null}
                         onClick={() => onScreenChange(item.id)}
                       >
@@ -446,7 +448,7 @@ function Sidebar({
                         {visibleCats.map((category) => (
                           <div
                             key={category.id}
-                            className={`sawa-sidebar-category-row ${selectedCategoryId === category.id ? 'sawa-sidebar-category-row-active' : ''}`}
+                            className={`sawa-sidebar-category-row ${selectedCategoryId === category.id ? 'sawa-sidebar-category-row-active' : ''} ${category.exists === false || category.availability === 'missing' ? 'sawa-sidebar-category-row-missing' : ''}`}
                             onContextMenu={(event) => onContextMenu(event, { type: 'category', category })}
                           >
                             <button
@@ -455,11 +457,25 @@ function Sidebar({
                               onClick={() => onSelectCategory(selectedCategoryId === category.id ? null : category.id)}
                               title={category.name}
                             >
-                              <span className="sawa-sidebar-category-name">{category.name}</span>
+                              <span className="sawa-sidebar-category-copy">
+                                <span className="sawa-sidebar-category-name">{category.name}</span>
+                                {category.exists === false || category.availability === 'missing' ? <small>{category.path}</small> : null}
+                              </span>
+                              {category.exists === false || category.availability === 'missing' ? <span className="sawa-sidebar-category-status" title={category.path}>Introuvable</span> : null}
                               <span className="category-count">{category.mangaCount ?? 0}</span>
                             </button>
 
                             <div className="sawa-sidebar-category-actions">
+                              {category.exists === false || category.availability === 'missing' ? (
+                                <button
+                                  type="button"
+                                  className="icon-button sawa-sidebar-category-relink"
+                                  title={`Retrouver ${category.path}`}
+                                  onClick={() => onRelinkCategory?.(category.id)}
+                                >
+                                  <FolderPlusIcon size={15} />
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 className="icon-button"

@@ -24,4 +24,4 @@ les conditions suivantes :
 5. Garantie.
    Le logiciel est fourni « en l'état », sans garantie d'aucune sorte.
 
-— Version 4.0.0 · Midnight Ember Edition
+— Version 5.0.1 · Sawa Horizon

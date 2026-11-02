@@ -408,7 +408,7 @@ function remapPersistedReferences(state, mangaEntries = [], chapterEntries = [])
   const keyedMangaRecords = [
     'metadata', 'metadataLocks', 'metadataFieldSource', 'favorites', 'mangaTags',
     'mangaTagMeta', 'annotations', 'readingStates', 'readStatus', 'knownChapterCounts',
-    'readerPrefs', 'identityRecords'
+    'identityRecords', 'coverProfiles', 'deletionTombstones'
   ];
   for (const [fromId, toId] of mangaMap.entries()) {
     for (const key of keyedMangaRecords) {
@@ -418,6 +418,16 @@ function remapPersistedReferences(state, mangaEntries = [], chapterEntries = [])
       });
     }
     state.metadataWorkbenchQueue = uniqueStrings((state.metadataWorkbenchQueue || []).map((value) => mangaMap.get(value) || value));
+    state.metadataWorkbenchItems = (state.metadataWorkbenchItems || []).map((item) => ({
+      ...item,
+      mangaId: mangaMap.get(String(item?.mangaId || '')) || item?.mangaId
+    }));
+    if (Array.isArray(state.metadataWorkbenchLastBatch?.entries)) {
+      state.metadataWorkbenchLastBatch.entries = state.metadataWorkbenchLastBatch.entries.map((entry) => ({
+        ...entry,
+        mangaId: mangaMap.get(String(entry?.mangaId || '')) || entry?.mangaId
+      }));
+    }
     if (state.vault) state.vault.privateMangaIds = uniqueStrings((state.vault.privateMangaIds || []).map((value) => mangaMap.get(value) || value));
     state.recents = (state.recents || []).map((entry) => ({ ...entry, mangaId: mangaMap.get(entry.mangaId) || entry.mangaId }));
     state.readingQueue = (state.readingQueue || []).map((entry) => ({ ...entry, mangaId: mangaMap.get(entry.mangaId) || entry.mangaId }));
@@ -431,6 +441,18 @@ function remapPersistedReferences(state, mangaEntries = [], chapterEntries = [])
       group.editionIds = uniqueStrings((group.editionIds || []).map((value) => mangaMap.get(value) || value));
       if (group.preferredEditionId === fromId) group.preferredEditionId = toId;
     }
+    if (state.readerPrefs?.visual?.byManga) {
+      moveRecordKey(state.readerPrefs.visual.byManga, fromId, toId);
+    }
+    state.identitySuggestions = (state.identitySuggestions || []).map((entry) => ({
+      ...entry,
+      fromMangaId: mangaMap.get(String(entry?.fromMangaId || '')) || entry?.fromMangaId,
+      toMangaId: mangaMap.get(String(entry?.toMangaId || '')) || entry?.toMangaId
+    }));
+    state.identityMediaIssues = (state.identityMediaIssues || []).map((entry) => ({
+      ...entry,
+      mangaId: mangaMap.get(String(entry?.mangaId || '')) || entry?.mangaId
+    }));
     state.identityAliases = state.identityAliases || {};
     state.identityAliases[fromId] = toId;
   }
@@ -446,6 +468,16 @@ function remapPersistedReferences(state, mangaEntries = [], chapterEntries = [])
         if (annotation?.chapterId === fromId) annotation.chapterId = toId;
       }
     }
+    if (state.readerPrefs?.guidedView?.panelMaps) {
+      moveRecordKey(state.readerPrefs.guidedView.panelMaps, fromId, toId, (value) => ({
+        ...(value || {}),
+        chapterRef: toId
+      }));
+    }
+    state.identityMediaIssues = (state.identityMediaIssues || []).map((entry) => ({
+      ...entry,
+      chapterId: chapterMap.get(String(entry?.chapterId || '')) || entry?.chapterId
+    }));
   }
   remapSession(state.session, mangaMap, chapterMap);
   return state;

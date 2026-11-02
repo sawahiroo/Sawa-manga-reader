@@ -32,7 +32,7 @@ describe('Sawa 4.1 shared search experience', () => {
         ]
       }]
     });
-    expect(normalized.version).toBe(4);
+    expect(normalized.version).toBe(8);
     expect(normalized.searchPrivacyVersion).toBe(1);
     expect(normalized.workspaces[0].tabs[0].searchState).toEqual({
       query: '',

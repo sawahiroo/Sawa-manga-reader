@@ -86,6 +86,8 @@ describe('identity reference migration', () => {
       recents: [{ mangaId: 'old', chapterId: 'old-chapter' }],
       readingQueue: [{ mangaId: 'old', chapterId: 'old-chapter' }],
       metadataWorkbenchQueue: ['old'],
+      metadataWorkbenchItems: [{ mangaId: 'old', status: 'review' }],
+      metadataWorkbenchLastBatch: { entries: [{ mangaId: 'old', previous: {} }] },
       vault: { privateMangaIds: ['old'] },
       collections: { c: { mangaIds: ['old'] } },
       workGroups: { w: { editionIds: ['old', 'other'], preferredEditionId: 'old' } },
@@ -109,6 +111,8 @@ describe('identity reference migration', () => {
     expect(state.progress['new-chapter']).toMatchObject({ mangaId: 'new', chapterId: 'new-chapter' });
     expect(state.vault.privateMangaIds).toEqual(['new']);
     expect(state.collections.c.mangaIds).toEqual(['new']);
+    expect(state.metadataWorkbenchItems[0].mangaId).toBe('new');
+    expect(state.metadataWorkbenchLastBatch.entries[0].mangaId).toBe('new');
     expect(state.workGroups.w).toMatchObject({ editionIds: ['new', 'other'], preferredEditionId: 'new' });
     expect(state.session.workspaces[0].tabs[0].stack[1]).toMatchObject({ mangaId: 'new', chapterId: 'new-chapter' });
     expect(state.session.scrollPositions['tab:new:new-chapter'].anchorId).toBe('new');

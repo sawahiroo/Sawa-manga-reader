@@ -16,6 +16,11 @@ contextBridge.exposeInMainWorld('mangaAPI', {
 
   addCategories: () => invoke('library:addCategories'),
   removeCategory: (categoryId) => invoke('library:removeCategory', categoryId),
+  listUnavailableLocations: () => invoke('library:listUnavailableLocations'),
+  pickRelocationTarget: (categoryId) => invoke('library:pickRelocationTarget', categoryId),
+  inspectRelocation: (input) => invoke('library:inspectRelocation', input),
+  applyRelocation: (planId) => invoke('library:applyRelocation', planId),
+  undoRelocation: (relocationId) => invoke('library:undoRelocation', relocationId),
   trashManga: (mangaId) => invoke('library:trashManga', mangaId),
   bulkTrashMangas: (mangaIds) => invoke('library:bulkTrashMangas', mangaIds),
   toggleCategoryHidden: (categoryId) => invoke('library:toggleCategoryHidden', categoryId),
@@ -88,9 +93,21 @@ contextBridge.exposeInMainWorld('mangaAPI', {
   deleteSmartCollection: (collectionId) => invoke('smartCollections:delete', collectionId),
 
   searchOnlineMetadata: (query) => invoke('metadata:searchOnline', query),
+  listMetadataProviders: () => invoke('metadata:listProviders'),
+  getMetadataCandidateCover: (identity) => invoke('metadata:getCandidateCover', identity),
+  hydrateMetadataCandidate: (candidate, input) => invoke('metadata:hydrateCandidate', candidate, input),
   importOnlineMetadata: (mangaId, onlineData) => invoke('metadata:importOnline', mangaId, onlineData),
   queueMetadataWorkbench: (mangaIds, mode) => invoke('metadata:queueWorkbench', mangaIds, mode),
   setMetadataWorkbenchQueue: (mangaIds) => invoke('metadata:setWorkbenchQueue', mangaIds),
+  getMetadataWorkbenchPage: (input) => invoke('metadata:getWorkbenchPage', input),
+  getMetadataWorkbenchSelectionIds: (input) => invoke('metadata:getWorkbenchSelectionIds', input),
+  searchMetadataCandidates: (input) => invoke('metadata:searchCandidates', input),
+  startMetadataWorkbenchAnalysis: (input) => invoke('metadata:startWorkbenchAnalysis', input),
+  applyMetadataWorkbenchMatches: (input) => invoke('metadata:applyWorkbenchMatches', input),
+  resolveMetadataWorkbenchItems: (input) => invoke('metadata:resolveWorkbenchItems', input),
+  retryMetadataWorkbenchItems: (mangaIds) => invoke('metadata:retryWorkbenchItems', mangaIds),
+  cancelMetadataWorkbenchJob: (jobId) => invoke('metadata:cancelWorkbenchJob', jobId),
+  undoLastMetadataWorkbenchBatch: () => invoke('metadata:undoLastWorkbenchBatch'),
   updateMetadataFieldLocks: (mangaId, patch) => invoke('metadata:updateFieldLocks', mangaId, patch),
   importComicInfo: (mangaId, options) => invoke('metadata:importComicInfo', mangaId, options),
 
@@ -115,6 +132,7 @@ contextBridge.exposeInMainWorld('mangaAPI', {
   getPanelMap: (chapterRef) => invoke('guidedView:getPanelMap', chapterRef),
   savePanelMap: (chapterRef, panelMap) => invoke('guidedView:savePanelMap', chapterRef, panelMap),
   saveTabsSession: (payload) => invoke('session:saveTabs', payload),
+  acknowledgeSessionFlush: (requestId, ok = true) => ipcRenderer.send('session:flushComplete', { requestId, ok: Boolean(ok) }),
   setVaultPin: (pin) => invoke('vault:setPin', pin),
   unlockVault: (pin) => invoke('vault:unlock', pin),
   lockVault: () => invoke('vault:lock'),
@@ -201,5 +219,10 @@ contextBridge.exposeInMainWorld('mangaAPI', {
     const handler = (_event, progress) => callback(progress);
     ipcRenderer.on('jobs:progress', handler);
     return () => ipcRenderer.removeListener('jobs:progress', handler);
+  },
+  onSessionFlushRequested: (callback) => {
+    const handler = (_event, requestId) => callback(requestId);
+    ipcRenderer.on('session:flushRequested', handler);
+    return () => ipcRenderer.removeListener('session:flushRequested', handler);
   }
 });

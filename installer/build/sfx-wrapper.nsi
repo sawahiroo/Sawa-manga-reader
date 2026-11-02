@@ -19,7 +19,7 @@
 ; Set by build-installer.mjs via /D switches at makensis invocation time:
 ;   /DPAYLOAD_DIR=<absolute path to win-unpacked>
 ;   /DOUTPUT_FILE=<final exe path>
-;   /DPRODUCT_VERSION=4.0.0
+;   /DPRODUCT_VERSION=5.0.1
 ;   /DICON_FILE=<absolute path to .ico>
 
 !ifndef PAYLOAD_DIR

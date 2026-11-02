@@ -98,8 +98,8 @@ function ChapterPreviewView({
           <p>{chapter.name} · {chapter.pageCount} pages</p>
         </div>
         <div className="detail-actions-row">
-          <button className="primary-button" onClick={() => onReadFrom(0)} disabled={isLoadingPages}>Lire depuis le début</button>
-          <button className="ghost-button" onClick={() => onReadFromNewTab(0)} disabled={isLoadingPages}><PlusIcon size={16} /> Nouvel onglet</button>
+          <button className="primary-button" onClick={() => onReadFrom(0, 'restart')} disabled={isLoadingPages}>Lire depuis le début</button>
+          <button className="ghost-button" onClick={() => onReadFromNewTab(0, 'restart')} disabled={isLoadingPages}><PlusIcon size={16} /> Nouvel onglet</button>
           {manga.sourceWeb?.linked ? (
             <button className="ghost-button" onClick={() => onOpenSourceSeries?.(manga)}>
               <LayersIcon size={14} /> Voir les chapitres web
@@ -142,9 +142,9 @@ function ChapterPreviewView({
               <button
                 key={page.id}
                 className="page-thumb"
-                onClick={() => onReadFrom(page.index)}
+                onClick={() => onReadFrom(page.index, 'exact-page')}
                 onMouseDown={middleMouseDown}
-                onAuxClick={(event) => middleAuxClick(event, () => onReadFromBackgroundTab(page.index))}
+                onAuxClick={(event) => middleAuxClick(event, () => onReadFromBackgroundTab(page.index, 'exact-page'))}
                 onContextMenu={(event) => onContextMenu(event, { type: 'chapter', manga, chapter, pageIndex: page.index })}
               >
                 <MediaAsset

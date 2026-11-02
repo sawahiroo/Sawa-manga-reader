@@ -246,7 +246,7 @@ function KavitaLibraryView({
                   key={manga.id}
                   manga={manga}
                   selectionMode={selectionMode}
-                  selected={selectedIds.has(manga.id)}
+                  selected={selectedIds.has(String(manga.id ?? '').trim())}
                   onOpen={onOpenManga}
                   onOpenInNewTab={onOpenMangaInNewTab}
                   onToggleFavorite={onToggleFavorite}

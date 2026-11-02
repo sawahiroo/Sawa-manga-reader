@@ -155,7 +155,7 @@ function runtimeFetch(url, options = {}) {
   return fetch(url, {
     ...options,
     headers: {
-      'User-Agent': 'Sawa Manga Library/4.0.0',
+      'User-Agent': 'Sawa Manga Library/5.0.1',
       ...(options.headers || {})
     }
   });

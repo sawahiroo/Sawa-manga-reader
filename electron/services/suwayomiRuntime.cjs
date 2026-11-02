@@ -342,7 +342,7 @@ async function graphqlRequestAt(baseUrl, query, variables = {}) {
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'User-Agent': 'Sawa Manga Library/4.0.0'
+      'User-Agent': 'Sawa Manga Library/5.0.1'
     },
     body: JSON.stringify({ query, variables })
   });

@@ -49,7 +49,7 @@ export function WelcomePage({ state, dispatch }) {
             Sawa Manga Library
           </span>
         </h1>
-        <div className="rule-ornament">✦ v 4.0.0 ✦</div>
+        <div className="rule-ornament">✦ v 5.0.1 ✦</div>
 
         <p
           style={{

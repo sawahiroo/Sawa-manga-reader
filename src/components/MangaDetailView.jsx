@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeftIcon, EditIcon, HeartIcon, LayersIcon, PlayIcon, PlusIcon, ScrollIcon, SearchIcon, SparklesIcon, TagIcon, BookIcon, ClockIcon, ZapIcon } from './Icons.jsx';
 import MediaAsset from './MediaAsset.jsx';
+import MetadataCandidateCover from './MetadataCandidateCover.jsx';
 import PreviewDisplayControls from './PreviewDisplayControls.jsx';
 import { getProgressPercent } from '../utils/reader.js';
 import { paginateItems } from '../utils/paginateItems.js';
@@ -174,7 +175,7 @@ function OnlineMetadataModal({ manga, onClose, onImport }) {
           {results.map((item) => (
             <div key={item.malId} className="online-result-card">
               <div className="online-result-cover">
-                {item.coverUrl ? <img src={item.coverUrl} alt={item.title} className="thumb-smooth" /> : <div className="cover-fallback">?</div>}
+                <MetadataCandidateCover candidate={item} alt={item.title} className="thumb-smooth" fallback={<div className="cover-fallback">?</div>} />
               </div>
               <div className="online-result-info">
                 <strong>{item.title}</strong>
@@ -436,8 +437,8 @@ function MangaDetailView({
 
       <div className="detail-panels">
         {/* Row 1: Description + Informations side by side */}
-        <div className="detail-panels-row">
-          <div className="detail-panel">
+        <div className="detail-panels-row detail-panels-primary">
+          <div className="detail-panel detail-panel-description">
             <h3 className="detail-panel-title">Description</h3>
             {manga.description ? (
               <p className="detail-description">{manga.description}</p>
@@ -446,7 +447,7 @@ function MangaDetailView({
             )}
           </div>
 
-          <div className="detail-panel">
+          <div className="detail-panel detail-panel-information">
             <h3 className="detail-panel-title">Informations</h3>
             <div className="detail-info-grid">
               <div className="detail-info-item">
@@ -520,8 +521,8 @@ function MangaDetailView({
         ) : null}
 
         {/* Row 2: Tags + Collections side by side */}
-        <div className="detail-panels-row">
-          <div className="detail-panel">
+        <div className="detail-panels-row detail-panels-organize">
+          <div className="detail-panel detail-panel-tags">
             <h3 className="detail-panel-title">
               <TagIcon size={16} /> Tags
               {onAddTag && (
@@ -541,7 +542,7 @@ function MangaDetailView({
             )}
           </div>
 
-          <div className="detail-panel">
+          <div className="detail-panel detail-panel-collections">
             <h3 className="detail-panel-title">
               <LayersIcon size={16} /> Collections
               {onAddToCollection && (

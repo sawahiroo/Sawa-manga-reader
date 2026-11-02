@@ -59,7 +59,7 @@ function SortableTab({
   const isCompact = density === 'compact' || density === 'minimal';
   const showPin = tab.pinned && density === 'full' && !iconOnly;
   const showCopy = !tab.pinned && !iconOnly;
-  const showClose = !tab.pinned && !iconOnly && density !== 'minimal';
+  const showClose = !tab.pinned && !iconOnly;
 
   return (
     <button
@@ -116,6 +116,7 @@ function SortableTab({
 
 function TitleBar({
   sidebarCollapsed = false,
+  readerFocus = false,
   onToggleSidebar,
   workspaces = [],
   activeWorkspaceId = null,
@@ -176,6 +177,9 @@ function TitleBar({
         <button
           className="window-button titlebar-sidebar-toggle no-drag"
           onClick={onToggleSidebar}
+          disabled={readerFocus}
+          aria-hidden={readerFocus ? 'true' : undefined}
+          tabIndex={readerFocus ? -1 : 0}
           aria-label={sidebarCollapsed ? 'Afficher la barre laterale' : 'Replier la barre laterale'}
           title={sidebarCollapsed ? 'Afficher la barre laterale' : 'Replier la barre laterale'}
         >
@@ -208,10 +212,10 @@ function TitleBar({
           </button>
         </div>
 
-        <div className="tabsbar-main" ref={tabsHostRef}>
+        <div className={`tabsbar-main ${layout.hasOverflow ? 'tabsbar-main-overflow' : ''}`} ref={tabsHostRef}>
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={layout.visibleTabs.map((tab) => tab.id)} strategy={horizontalListSortingStrategy}>
-              <div className="tabsbar-visible-list" style={{ '--tabs-gap': `${layout.tabGap}px` }}>
+              <div className="tabsbar-visible-list" style={{ '--tabs-gap': `${layout.tabGap}px`, minWidth: layout.hasOverflow ? `${layout.contentWidth}px` : 0 }}>
                 {layout.visibleTabs.map((tab) => (
                   <SortableTab
                     key={tab.id}

@@ -424,7 +424,12 @@ function CollectionDetailView({
   initialScrollTop = 0,
   initialScrollPosition = null,
   scrollKey = '',
-  onScrollPositionChange
+  onScrollPositionChange,
+  cardSize = 'comfortable',
+  visualVariant = 'classic',
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   return (
     <div className="collection-detail">
@@ -457,6 +462,11 @@ function CollectionDetailView({
       ) : (
         <VirtualMangaGrid
           mangas={mangas}
+          cardSize={cardSize}
+          visualVariant={visualVariant}
+          foilEnabled={foilEnabled}
+          foilIntensity={foilIntensity}
+          adaptiveVisualEffects={adaptiveVisualEffects}
           className="collection-manga-grid-virtual"
           initialScrollTop={initialScrollTop}
           initialScrollPosition={initialScrollPosition}
@@ -499,7 +509,12 @@ function CollectionsView({
   initialScrollTop = 0,
   initialScrollPosition = null,
   scrollKey = '',
-  onScrollPositionChange
+  onScrollPositionChange,
+  cardSize = 'comfortable',
+  visualVariant = 'classic',
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [activeCollectionId, setActiveCollectionId] = useState(null);
@@ -588,6 +603,11 @@ function CollectionsView({
           initialScrollPosition={initialScrollPosition}
           scrollKey={scrollKey}
           onScrollPositionChange={onScrollPositionChange}
+          cardSize={cardSize}
+          visualVariant={visualVariant}
+          foilEnabled={foilEnabled}
+          foilIntensity={foilIntensity}
+          adaptiveVisualEffects={adaptiveVisualEffects}
         />
 
         {editingCollection ? (

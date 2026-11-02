@@ -97,6 +97,13 @@ function sanitizePrivateMangaReferences(clientState, privateMangaIds = new Set()
   clientState.recents = (clientState.recents || []).filter((entry) => !privateIds.has(String(entry?.mangaId)));
   clientState.metadataWorkbenchQueue = (clientState.metadataWorkbenchQueue || [])
     .filter((mangaId) => !privateIds.has(String(mangaId)));
+  clientState.metadataWorkbenchItems = (clientState.metadataWorkbenchItems || [])
+    .filter((item) => !privateIds.has(String(item?.mangaId)));
+  if (Array.isArray(clientState.metadataWorkbenchLastBatch?.entries)) {
+    clientState.metadataWorkbenchLastBatch.entries = clientState.metadataWorkbenchLastBatch.entries
+      .filter((entry) => !privateIds.has(String(entry?.mangaId)));
+    if (clientState.metadataWorkbenchLastBatch.entries.length === 0) clientState.metadataWorkbenchLastBatch = null;
+  }
   clientState.readingQueue = (clientState.readingQueue || [])
     .filter((item) => !privateIds.has(String(item?.mangaId)));
 

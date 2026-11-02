@@ -25,6 +25,7 @@ describe('vault-safe persisted payload', () => {
         s1: { appearance: { type: 'banner', featuredMangaIds: ['private', 'public'] } }
       },
       metadataWorkbenchQueue: ['private', 'public'],
+      metadataWorkbenchItems: [{ mangaId: 'private', candidate: { title: 'Secret' } }, { mangaId: 'public' }],
       readingQueue: [{ mangaId: 'private' }, { mangaId: 'public' }],
       recents: [{ mangaId: 'private' }, { mangaId: 'public' }],
       session: {
@@ -49,6 +50,7 @@ describe('vault-safe persisted payload', () => {
     expect(payload.chapterStates).toEqual({ 'public-chapter': 'read' });
     expect(payload.progress).toEqual({ 'public-chapter': {} });
     expect(payload.metadataWorkbenchQueue).toEqual(['public']);
+    expect(payload.metadataWorkbenchItems).toEqual([{ mangaId: 'public' }]);
     expect(payload.readingQueue).toEqual([{ mangaId: 'public' }]);
     expect(payload.recents).toEqual([{ mangaId: 'public' }]);
     expect(payload.session.workspaces[0].tabs[0].stack).toEqual([{ screen: 'manga', mangaId: 'public' }]);

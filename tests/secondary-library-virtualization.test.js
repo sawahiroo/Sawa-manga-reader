@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { chunkMangas, resolveVirtualGridMetrics } from '../src/components/VirtualMangaGrid.js';
+import { chunkMangas, resolveVirtualGridLayout, resolveVirtualGridMetrics } from '../src/components/VirtualMangaGrid.js';
 
 describe('secondary manga grids', () => {
   it('chunks large collections into virtual rows', () => {
@@ -39,6 +39,20 @@ describe('secondary manga grids', () => {
       performanceMode: true,
       overscan: 0
     });
+  });
+
+  it('includes card gaps and a fixed Horizon footer in the virtual row contract', () => {
+    const layout = resolveVirtualGridLayout({
+      cardSize: 'comfortable',
+      itemCount: 500,
+      containerWidth: 1704,
+      visualVariant: 'horizon'
+    });
+    expect(layout.columns).toBe(6);
+    expect(layout.gap).toBe(18);
+    expect(layout.footerHeight).toBe(118);
+    expect(layout.rowHeight).toBe(layout.cardHeight + layout.gap);
+    expect(layout.columnWidth * layout.columns + layout.gap * (layout.columns - 1)).toBeCloseTo(1704 - 48, 5);
   });
 
   it('keeps the vault header in the same virtual scroll flow as its cards', () => {

@@ -109,7 +109,7 @@ export function UninstallPage({ state, dispatch }) {
         header={{
           eyebrow: 'Désinstallation',
           title: 'Retirer Sawa Manga Library',
-          sub: 'v4.0.0 · Midnight Ember',
+          sub: 'v5.0.1 · Sawa Horizon',
         }}
         footer={
           <>

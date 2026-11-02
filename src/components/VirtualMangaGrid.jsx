@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import MangaCard from './MangaCard.jsx';
-import { chunkMangas, resolveVirtualGridMetrics } from './VirtualMangaGrid.js';
+import { chunkMangas, resolveVirtualGridLayout, resolveVirtualGridMetrics } from './VirtualMangaGrid.js';
 import {
   getScrollOffset,
   makeAnchoredScrollPosition,
@@ -26,31 +26,43 @@ function VirtualMangaGrid({
   selectionMode = false,
   selectedIds = new Set(),
   onToggleSelect,
-  privateBlur = false
+  privateBlur = false,
+  visualVariant = 'classic',
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   const containerRef = useRef(null);
   const restoringRef = useRef(true);
   const restoredRef = useRef('');
   const virtualizerRef = useRef(null);
   const [columns, setColumns] = useState(4);
+  const [containerWidth, setContainerWidth] = useState(0);
   const [columnsMeasured, setColumnsMeasured] = useState(false);
-  const { minCard, rowHeight, performanceMode, overscan } = resolveVirtualGridMetrics(cardSize, mangas.length);
+  const baseMetrics = resolveVirtualGridMetrics(cardSize, mangas.length);
+  const layout = resolveVirtualGridLayout({ cardSize, itemCount: mangas.length, containerWidth, visualVariant });
+  const { minCard, rowHeight, performanceMode, overscan } = containerWidth > 0 ? layout : baseMetrics;
 
   useEffect(() => {
     const node = containerRef.current;
     if (!node) return undefined;
     const update = () => {
-      setColumns(Math.max(1, Math.floor(Math.max(0, node.clientWidth - 48) / minCard)));
+      const width = node.clientWidth;
+      const nextLayout = resolveVirtualGridLayout({ cardSize, itemCount: mangas.length, containerWidth: width, visualVariant });
+      setContainerWidth(width);
+      setColumns(visualVariant === 'horizon'
+        ? nextLayout.columns
+        : Math.max(1, Math.floor((Math.max(0, width - 48) + 18) / (minCard + 18))));
       setColumnsMeasured(true);
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [minCard]);
+  }, [cardSize, mangas.length, minCard, visualVariant]);
 
   const rows = useMemo(() => chunkMangas(mangas, columns), [mangas, columns]);
-  const selectionOrder = useMemo(() => mangas.map((manga) => manga.id), [mangas]);
+  const selectionOrder = useMemo(() => mangas.map((manga) => String(manga.id ?? '').trim()).filter(Boolean), [mangas]);
   const headerOffset = header ? 1 : 0;
   const initialPosition = normalizeScrollPosition(initialScrollPosition ?? initialScrollTop);
   const virtualizer = useVirtualizer({
@@ -66,6 +78,9 @@ function VirtualMangaGrid({
     overscan
   });
   virtualizerRef.current = virtualizer;
+  useLayoutEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
   const restoreToken = `${scrollKey || 'grid'}:${columns}:${initialPosition.anchorId || 'offset'}:${cardSize}:${headerOffset}`;
 
   useLayoutEffect(() => {
@@ -141,7 +156,11 @@ function VirtualMangaGrid({
                 width: '100%',
                 height: `${rowHeight}px`,
                 transform: `translateY(${virtualRow.start}px)`,
-                '--grid-columns': columns
+                '--grid-columns': columns,
+                '--manga-grid-gap': `${layout.gap || 18}px`,
+                '--mc-card-height': `${layout.cardHeight || Math.max(1, rowHeight - 18)}px`,
+                '--mc-cover-height': layout.coverHeight ? `${layout.coverHeight}px` : undefined,
+                '--mc-footer-height': layout.footerHeight ? `${layout.footerHeight}px` : undefined
               }}
             >
             {rows[rowIndex]?.map((manga) => (
@@ -153,11 +172,15 @@ function VirtualMangaGrid({
                 onToggleFavorite={onToggleFavorite}
                 onContextMenu={onContextMenu}
                 selectionMode={selectionMode}
-                selected={selectedIds.has(manga.id)}
+                selected={selectedIds.has(String(manga.id ?? '').trim())}
                 onToggleSelect={onToggleSelect}
                 selectionOrder={selectionOrder}
                 privateBlur={privateBlur}
                 performanceMode={performanceMode}
+                visualVariant={visualVariant}
+                foilEnabled={foilEnabled}
+                foilIntensity={foilIntensity}
+                adaptiveVisualEffects={adaptiveVisualEffects}
               />
             ))}
           </div>

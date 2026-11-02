@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useRef } from 'react';
-import { ArchiveIcon, CheckIcon, HeartIcon, LayersIcon } from './Icons.jsx';
+import { AlertIcon, ArchiveIcon, CheckIcon, HeartIcon, LayersIcon } from './Icons.jsx';
 import MediaAsset from './MediaAsset.jsx';
+import { normalizeSelectionId, resolveMangaSelectionIntent } from '../utils/selectionSessions.js';
+import { resolveAdaptiveVisualEffects } from '../utils/horizon.js';
 
 const MangaCard = memo(function MangaCard({
   manga,
@@ -15,22 +17,31 @@ const MangaCard = memo(function MangaCard({
   onToggleSelect,
   selectionOrder = [],
   privateBlur = false,
-  performanceMode = false
+  performanceMode = false,
+  visualVariant = 'classic',
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   const cardRef = useRef(null);
   const pendingPointerRef = useRef(null);
   const pointerRafRef = useRef(null);
 
+  const mangaId = normalizeSelectionId(manga.id);
+  const reducedMotion = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+  const visualEffects = resolveAdaptiveVisualEffects({ foilEnabled, adaptiveVisualEffects, reducedMotion, performanceMode });
+
   const handleClick = useCallback((event) => {
-    if (selectionMode || event.ctrlKey || event.metaKey || event.shiftKey) {
+    const intent = resolveMangaSelectionIntent(event, selectionMode);
+    if (intent === 'toggle-selection') {
       onToggleSelect?.(manga.id, { event, orderedIds: selectionOrder });
       return;
     }
-    onOpen?.(manga.id);
+    if (intent === 'open') onOpen?.(manga.id);
   }, [selectionMode, onToggleSelect, manga.id, onOpen, selectionOrder]);
 
   const handleAuxClick = useCallback((event) => {
-    if (selectionMode || event.button !== 1) return;
+    if (resolveMangaSelectionIntent(event, selectionMode) !== 'open-background') return;
     event.preventDefault();
     event.stopPropagation();
     onOpenBackground?.(manga.id);
@@ -50,6 +61,17 @@ const MangaCard = memo(function MangaCard({
     onToggleSelect?.(manga.id, { event, orderedIds: selectionOrder });
   }, [manga.id, onToggleSelect, selectionOrder]);
 
+  const handleKeyDown = useCallback((event) => {
+    if (event.key !== ' ' && event.key !== 'Enter') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (selectionMode || event.ctrlKey || event.metaKey || event.shiftKey || event.key === ' ') {
+      onToggleSelect?.(manga.id, { event, orderedIds: selectionOrder });
+      return;
+    }
+    onOpen?.(manga.id);
+  }, [manga.id, onOpen, onToggleSelect, selectionMode, selectionOrder]);
+
   const handleContext = useCallback((event) => onContextMenu?.(event, { type: 'manga', manga }), [manga, onContextMenu]);
   const handleOpenSourceSeries = useCallback((event) => {
     event.stopPropagation();
@@ -60,7 +82,7 @@ const MangaCard = memo(function MangaCard({
   // every card on screen would run getBoundingClientRect + 4 style writes per event, which is a
   // heavy cost with 20+ cards visible. Coalesce into a single update per animation frame.
   const handlePointerMove = useCallback((event) => {
-    if (compact || performanceMode || selectionMode) return;
+    if (compact || performanceMode || selectionMode || !visualEffects.dynamicFoil || visualVariant !== 'horizon') return;
     pendingPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
     if (pointerRafRef.current != null) return;
     pointerRafRef.current = window.requestAnimationFrame(() => {
@@ -80,7 +102,7 @@ const MangaCard = memo(function MangaCard({
       node.style.setProperty('--mc-shine-x', `${(px * 100).toFixed(1)}%`);
       node.style.setProperty('--mc-shine-y', `${(py * 100).toFixed(1)}%`);
     });
-  }, [compact, performanceMode, selectionMode]);
+  }, [compact, performanceMode, selectionMode, visualEffects.dynamicFoil, visualVariant]);
 
   const handlePointerLeave = useCallback(() => {
     if (pointerRafRef.current != null) {
@@ -107,10 +129,11 @@ const MangaCard = memo(function MangaCard({
   const progressPercent = manga.progressPercent ?? 0;
   const stateLabel = manga.isRead ? 'Lu' : progressPercent > 0 ? 'En cours' : null;
   const allTags = manga.tags || [];
-  const visibleTags = compact || performanceMode ? [] : allTags.slice(0, 3);
-  const extraCount = Math.max(0, allTags.length - 3);
+  const tagLimit = compact ? 2 : 3;
+  const visibleTags = allTags.slice(0, tagLimit);
+  const extraCount = Math.max(0, allTags.length - tagLimit);
   const infoFragments = [`${manga.chapterCount} ch.`];
-  if (!compact && !performanceMode && manga.author) infoFragments.push(manga.author);
+  if (!compact && manga.author) infoFragments.push(manga.author);
   if (progressPercent > 0) infoFragments.push(`${progressPercent}%`);
 
   return (
@@ -119,15 +142,25 @@ const MangaCard = memo(function MangaCard({
       className={[
         'mc',
         compact ? 'mc-compact' : '',
-        performanceMode ? 'mc-performance mc-compact' : '',
+        performanceMode ? 'mc-performance' : '',
         selectionMode ? 'mc-select-mode' : '',
         selected ? 'mc-selected' : '',
-        privateBlur ? 'mc-private' : ''
+        privateBlur ? 'mc-private' : '',
+        manga.categoryUnavailable ? 'mc-unavailable' : '',
+        visualVariant === 'horizon' ? 'mc-horizon' : 'mc-classic',
+        visualEffects.foil ? 'mc-foil-enabled' : 'mc-foil-disabled',
+        visualEffects.dynamicFoil ? 'mc-foil-dynamic' : 'mc-foil-static'
       ].filter(Boolean).join(' ')}
+      style={{ '--mc-foil-strength': Math.max(0, Math.min(100, Number(foilIntensity || 0))) / 100 }}
       onClick={handleClick}
       onMouseDown={handleMiddleDown}
       onAuxClick={handleAuxClick}
-      data-manga-id={manga.id}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      role="option"
+      aria-selected={Boolean(selected)}
+      aria-label={`${selected ? 'Selectionne, ' : ''}${manga.displayTitle || 'Manga'}`}
+      data-manga-id={mangaId}
       onContextMenu={handleContext}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
@@ -175,6 +208,7 @@ const MangaCard = memo(function MangaCard({
           ) : null}
 
           <div className="mc-badges">
+            {manga.categoryUnavailable ? <span className="mc-badge mc-badge-unavailable"><AlertIcon size={11} /> Hors ligne</span> : null}
             {stateLabel ? (
               <span className={`mc-badge ${manga.isRead ? 'mc-badge-read' : 'mc-badge-progress'}`}>
                 {stateLabel}
@@ -189,9 +223,16 @@ const MangaCard = memo(function MangaCard({
           </div>
 
           {selectionMode ? (
-            <button type="button" className={`mc-select-toggle ${selected ? 'mc-select-toggle-active' : ''}`} onClick={handleSelectButton} title={selected ? 'Retirer de la selection' : 'Ajouter a la selection'}>
-              <CheckIcon size={14} />
-            </button>
+            <label className={`mc-select-toggle ${selected ? 'mc-select-toggle-active' : ''}`} title={selected ? 'Retirer de la selection' : 'Ajouter a la selection'}>
+              <input
+                type="checkbox"
+                checked={Boolean(selected)}
+                onChange={handleSelectButton}
+                onClick={(event) => event.stopPropagation()}
+                aria-label={`${selected ? 'Retirer' : 'Ajouter'} ${manga.displayTitle || 'ce manga'} de la selection`}
+              />
+              <CheckIcon size={14} aria-hidden="true" />
+            </label>
           ) : onToggleFavorite ? (
             <button
               type="button"
@@ -226,18 +267,15 @@ const MangaCard = memo(function MangaCard({
           ))}
         </div>
 
-        {manga.sourceWeb?.linked && !compact && !performanceMode && !selectionMode ? (
+        {manga.sourceWeb?.linked && !selectionMode ? (
           <div className="mc-source-row">
-            <div className="mc-source-copy">
-              <strong>{manga.sourceWeb.sourceLabel || 'Source web'}</strong>
-              <span>{manga.sourceWeb.statusLabel || 'Reprendre la serie web en un clic.'}</span>
-            </div>
             <button
               type="button"
               className="mc-source-action"
               onClick={handleOpenSourceSeries}
+              title={manga.sourceWeb.statusLabel || 'Ouvrir les chapitres web'}
             >
-              Voir les chapitres web
+              <LayersIcon size={12} /> {manga.sourceWeb.sourceLabel || 'Source web'}
             </button>
           </div>
         ) : null}

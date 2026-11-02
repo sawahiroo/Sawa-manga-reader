@@ -4,10 +4,22 @@ const EMPTY_SESSION = Object.freeze({
   anchorId: null
 });
 
+export function normalizeSelectionId(id) {
+  return String(id ?? '').trim();
+}
+
 function uniqueIds(ids) {
   return [...new Set((Array.isArray(ids) ? ids : [])
-    .map((id) => String(id || '').trim())
+    .map(normalizeSelectionId)
     .filter(Boolean))];
+}
+
+export function resolveMangaSelectionIntent(event = {}, selectionMode = false) {
+  const button = Number(event?.button ?? 0);
+  if (button === 1) return selectionMode ? 'ignore' : 'open-background';
+  if (button !== 0) return 'ignore';
+  if (selectionMode || event?.ctrlKey || event?.metaKey || event?.shiftKey) return 'toggle-selection';
+  return 'open';
 }
 
 export function makeSelectionSessionKey({
@@ -39,7 +51,7 @@ function updateSession(state, key, updater) {
       [key]: {
         mode: Boolean(next.mode),
         selectedIds: uniqueIds(next.selectedIds),
-        anchorId: next.anchorId ? String(next.anchorId) : null
+        anchorId: normalizeSelectionId(next.anchorId) || null
       }
     }
   };
@@ -101,7 +113,7 @@ export function selectionSessionsReducer(state = createSelectionSessionsState(),
       });
     case 'toggle':
       return updateSession(state, key, (session) => {
-        const id = String(action.id || '').trim();
+        const id = normalizeSelectionId(action.id);
         if (!id) return session;
         const selected = new Set(session.selectedIds);
         if (action.shiftKey && session.anchorId) {
@@ -133,4 +145,3 @@ export function getSelectionSummary(session, visibleIds = []) {
     selectedIdSet: new Set(selectedIds)
   };
 }
-

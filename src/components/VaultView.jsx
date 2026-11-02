@@ -28,7 +28,7 @@ function VaultMetaPill({ label, value }) {
   );
 }
 
-function VaultSetupCard({ configured, onSubmit, title, description, submitLabel, vault }) {
+function VaultSetupCard({ configured, onSubmit, title, description, submitLabel, vault, visualVariant = 'classic' }) {
   const [pin, setPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [error, setError] = useState('');
@@ -55,6 +55,62 @@ function VaultSetupCard({ configured, onSubmit, title, description, submitLabel,
     }
   };
 
+  const form = (
+    <form className="vault-form" onSubmit={handleSubmit}>
+      <label className="vault-pin-field">
+        <span>Code PIN</span>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={pin}
+          onChange={(event) => setPin(event.target.value)}
+          placeholder="Saisir le code PIN"
+          autoFocus
+          autoComplete="current-password"
+        />
+      </label>
+      {requiresConfirm ? (
+        <label className="vault-pin-field">
+          <span>Confirmation</span>
+          <input
+            type="password"
+            inputMode="numeric"
+            value={confirmPin}
+            onChange={(event) => setConfirmPin(event.target.value)}
+            placeholder="Confirmer le code PIN"
+            autoComplete="new-password"
+          />
+        </label>
+      ) : null}
+      {error ? <span className="vault-form-error" role="alert">{error}</span> : null}
+      <button type="submit" className="primary-button vault-unlock-action"><LockIcon size={15} /> {submitLabel}</button>
+    </form>
+  );
+
+  if (visualVariant === 'horizon') {
+    return (
+      <div className="vault-unlock-stage">
+        <div className="vault-lock-emblem" aria-hidden="true">
+          <span><LockIcon size={30} /></span>
+        </div>
+        <div className="vault-unlock-heading">
+          <span className="vault-kicker">Coffre prive</span>
+          <h1>{title}</h1>
+          <p>{description}</p>
+        </div>
+        {form}
+        <details className="vault-security-details">
+          <summary>Protection et verrouillage automatique</summary>
+          <div className="vault-security-details-body">
+            <VaultMetaPill label="Protection" value={getSecurityLabel(vault)} />
+            <VaultMetaPill label="Fermeture" value="Verrouillage auto" />
+            <p>{getSecurityCopy(vault)}</p>
+          </div>
+        </details>
+      </div>
+    );
+  }
+
   return (
     <div className="vault-locked-card">
       <div className="vault-locked-copy">
@@ -67,27 +123,7 @@ function VaultSetupCard({ configured, onSubmit, title, description, submitLabel,
         </div>
         <p className="vault-security-copy">{getSecurityCopy(vault)}</p>
       </div>
-      <form className="vault-form" onSubmit={handleSubmit}>
-        <input
-          type="password"
-          inputMode="numeric"
-          value={pin}
-          onChange={(event) => setPin(event.target.value)}
-          placeholder="Code PIN"
-          autoFocus
-        />
-        {requiresConfirm ? (
-          <input
-            type="password"
-            inputMode="numeric"
-            value={confirmPin}
-            onChange={(event) => setConfirmPin(event.target.value)}
-            placeholder="Confirmer le code PIN"
-          />
-        ) : null}
-        {error ? <span className="vault-form-error">{error}</span> : null}
-        <button type="submit" className="primary-button">{submitLabel}</button>
-      </form>
+      {form}
     </div>
   );
 }
@@ -115,7 +151,11 @@ function VaultView({
   onUnlock,
   onLock,
   onToggleBlur,
-  onToggleStealth
+  onToggleStealth,
+  visualVariant = 'classic',
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   const activeCategory = useMemo(
     () => categories.find((category) => category.id === activeCategoryId) || null,
@@ -128,6 +168,7 @@ function VaultView({
         <VaultSetupCard
           configured={false}
           vault={vault}
+          visualVariant={visualVariant}
           title="Configure un coffre discret pour les contenus sensibles."
           description="Les titres prives et les categories envoyees au coffre disparaissent de la navigation normale tant que tu restes hors du coffre."
           submitLabel="Activer le coffre"
@@ -143,6 +184,7 @@ function VaultView({
         <VaultSetupCard
           configured
           vault={vault}
+          visualVariant={visualVariant}
           title="Le coffre est verrouille."
           description="Entre ton code pour retrouver les mangas prives. A la fermeture de l application, le coffre se reverrouille automatiquement."
           submitLabel="Deverrouiller"
@@ -262,6 +304,10 @@ function VaultView({
           selectionMode={selectionMode}
           onToggleSelect={onToggleSelect}
           privateBlur={vault.blurCovers}
+          visualVariant={visualVariant}
+          foilEnabled={foilEnabled}
+          foilIntensity={foilIntensity}
+          adaptiveVisualEffects={adaptiveVisualEffects}
         />
     </section>
   );

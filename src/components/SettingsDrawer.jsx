@@ -161,6 +161,8 @@ export default function SettingsDrawer({
   const vaultConfigured = Boolean(vault?.configured);
   const vaultLocked = Boolean(vault?.locked);
   const experimental = ui.experimental || {};
+  const metadataProviders = ui.metadataProviders || {};
+  const metadataProviderEnabled = metadataProviders.enabled || {};
   const availableSidebarSections = SIDEBAR_SECTION_OPTIONS.filter((section) => showSources || section.id !== 'sources');
   const hiddenSidebarSections = sidebarHiddenSections && typeof sidebarHiddenSections === 'object' ? sidebarHiddenSections : {};
   const [backupBusy, setBackupBusy] = useState(false);
@@ -170,6 +172,21 @@ export default function SettingsDrawer({
       ? sidebarSections.filter((sectionId) => availableSidebarSections.some((section) => section.id === sectionId) && !hiddenSidebarSections[sectionId])
       : availableSidebarSections.map((section) => section.id)
   );
+  function updateMetadataProviders(patch) {
+    onChange({
+      metadataProviders: {
+        ...metadataProviders,
+        ...patch,
+        enabled: patch.enabled || metadataProviderEnabled
+      }
+    });
+  }
+
+  function setMetadataProviderEnabled(providerId, enabled) {
+    updateMetadataProviders({
+      enabled: { ...metadataProviderEnabled, [providerId]: Boolean(enabled) }
+    });
+  }
   async function handleExportSawa() {
     setBackupBusy(true);
     try {
@@ -292,6 +309,24 @@ export default function SettingsDrawer({
             })}
           </div>
         </div>
+
+        {ui.interfaceMode === 'sawa' ? (
+          <div className="settings-section horizon-settings-section">
+            <div className="settings-section-heading">
+              <h4>Expérience Sawa</h4>
+              <span>Horizon est la nouvelle présentation. Classique reste disponible pendant la version 5.0.</span>
+            </div>
+            <div className="segmented-control segmented-control-full">
+              <button className={ui.sawaExperience !== 'classic' ? 'active' : ''} onClick={() => onChange({ sawaExperience: 'horizon' })}>Horizon</button>
+              <button className={ui.sawaExperience === 'classic' ? 'active' : ''} onClick={() => onChange({ sawaExperience: 'classic' })}>Sawa classique</button>
+            </div>
+            <label className="settings-toggle"><span>Ambiance cinématique</span><input type="checkbox" checked={ui.cinematicBackdrop !== false} onChange={(event) => onChange({ cinematicBackdrop: event.target.checked })} /></label>
+            <div className="settings-subsection"><h5>Intensité de l’ambiance ({ui.cinematicIntensity ?? 58}%)</h5><input className="settings-slider" type="range" min="0" max="100" value={ui.cinematicIntensity ?? 58} onChange={(event) => onChange({ cinematicIntensity: Number(event.target.value) })} /></div>
+            <label className="settings-toggle"><span>Reflet prismatique des cartes</span><input type="checkbox" checked={ui.foilEnabled !== false} onChange={(event) => onChange({ foilEnabled: event.target.checked })} /></label>
+            <div className="settings-subsection"><h5>Intensité du reflet ({ui.foilIntensity ?? 28}%)</h5><input className="settings-slider" type="range" min="0" max="100" value={ui.foilIntensity ?? 28} onChange={(event) => onChange({ foilIntensity: Number(event.target.value) })} /></div>
+            <label className="settings-toggle"><span>Adapter les effets aux performances</span><input type="checkbox" checked={ui.adaptiveVisualEffects !== false} onChange={(event) => onChange({ adaptiveVisualEffects: event.target.checked })} /></label>
+          </div>
+        ) : null}
 
         <div className="settings-section settings-grid-two">
           <section className="settings-card-block">
@@ -580,10 +615,51 @@ export default function SettingsDrawer({
                 <input type="checkbox" checked={!!ui.onlineDescriptionAllowed} onChange={(e) => onChange({ onlineDescriptionAllowed: e.target.checked })} />
               </label>
               <label className="settings-toggle">
-                <span>Afficher les resultats NSFW (nHentai)</span>
+                <span>Activer les sources adultes</span>
                 <input type="checkbox" checked={!!ui.allowNsfwSources} onChange={(e) => onChange({ allowNsfwSources: e.target.checked })} />
               </label>
-              <div className="settings-note">Desactive = nHentai est completement retire des recherches de metadonnees.</div>
+              <div className="settings-note">Desactive = nHentai, IMHentai et HentaiEra ne sont jamais interroges.</div>
+              {ui.allowNsfwSources ? (
+                <div className="settings-subsection metadata-provider-settings">
+                  <h5>Fournisseurs adultes</h5>
+                  {[
+                    ['nhentai', 'nHentai'],
+                    ['imhentai', 'IMHentai'],
+                    ['hentaiera', 'HentaiEra']
+                  ].map(([providerId, label]) => (
+                    <label key={providerId} className="settings-toggle">
+                      <span>{label}</span>
+                      <input
+                        type="checkbox"
+                        checked={metadataProviderEnabled[providerId] !== false && (providerId === 'nhentai' || metadataProviderEnabled[providerId] === true)}
+                        onChange={(event) => setMetadataProviderEnabled(providerId, event.target.checked)}
+                      />
+                    </label>
+                  ))}
+                  <label className="settings-field">
+                    <span>Miroir prefere</span>
+                    <select
+                      value={metadataProviders.preferredAdultMirror || 'imhentai'}
+                      onChange={(event) => updateMetadataProviders({ preferredAdultMirror: event.target.value })}
+                    >
+                      <option value="imhentai">IMHentai</option>
+                      <option value="hentaiera">HentaiEra</option>
+                    </select>
+                  </label>
+                  <label className="settings-toggle settings-toggle-rich">
+                    <div className="settings-toggle-copy">
+                      <strong>Autoriser le fallback HTML</strong>
+                      <small>Fragile et limite a une requete toutes les 1,5 s. Sawa s arrete sur CAPTCHA ou protection.</small>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={!!metadataProviders.allowAdultHtmlFallback}
+                      onChange={(event) => updateMetadataProviders({ allowAdultHtmlFallback: event.target.checked })}
+                    />
+                  </label>
+                  <div className="settings-note">Aucun contournement, cookie navigateur ou hotlink de couverture n est utilise.</div>
+                </div>
+              ) : null}
               <label className="settings-toggle">
                 <span>Confirmer avant import</span>
                 <input type="checkbox" checked={!!ui.onlineConfirmBeforeImport} onChange={(e) => onChange({ onlineConfirmBeforeImport: e.target.checked })} />
@@ -795,7 +871,7 @@ export default function SettingsDrawer({
         <div className="settings-section">
           <div className="settings-section-heading"><h4>A propos</h4></div>
           <div className="settings-note">
-            <strong>Sawa Manga Library v4.1.0</strong><br />
+            <strong>Sawa Manga Library v5.0.1</strong><br />
             Bibliotheque manga locale, premium, intelligente et entierement hors ligne.
           </div>
         </div>

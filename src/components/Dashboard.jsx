@@ -42,7 +42,7 @@ function DashSection({ title, icon, mangas, onOpen, onToggleFavorite, onContextM
             onContextMenu={onContextMenu}
             compact
             selectionMode={selectionMode}
-            selected={selectedIds.has(manga.id)}
+            selected={selectedIds.has(String(manga.id ?? '').trim())}
             onToggleSelect={onToggleSelect}
             selectionOrder={selectionOrder}
           />

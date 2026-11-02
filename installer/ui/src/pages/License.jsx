@@ -39,7 +39,7 @@ const FALLBACK_EULA = (
       est fourni « en l'état », sans garantie d'aucune sorte.
     </p>
     <p style={{ margin: 0, color: 'var(--text-muted)' }}>
-      — Version 4.0.0 · Midnight Ember Edition
+      — Version 5.0.1 · Sawa Horizon
     </p>
   </>
 );

@@ -9,6 +9,8 @@ import {
   normalizeScrollPosition,
   resolveAnchoredScrollOffset
 } from '../utils/scrollPositions.js';
+import { selectHorizonResume } from '../utils/horizon.js';
+import { resolveVirtualGridLayout, resolveVirtualGridMetrics } from './VirtualMangaGrid.js';
 
 function makeCarouselPicks(mangas, seed) {
   const key = `${seed}:${mangas.length}`;
@@ -95,6 +97,43 @@ function HeroCarousel({ mangas, onOpen, onContextMenu }) {
   );
 }
 
+function HorizonHero({ mangas, onOpen, onContextMenu, cinematicBackdrop = true, cinematicIntensity = 58 }) {
+  const { resume, recents } = useMemo(() => selectHorizonResume(mangas, { recentLimit: 6 }), [mangas]);
+  const featured = resume || recents[0] || mangas[0] || null;
+  if (!featured) return null;
+  const backdrop = cinematicBackdrop && featured.coverSrc
+    ? { '--horizon-backdrop-image': `url("${featured.coverSrc}")`, '--horizon-backdrop-opacity': Math.max(0, Math.min(100, cinematicIntensity)) / 100 }
+    : undefined;
+  return (
+    <section className="horizon-hero" style={backdrop} aria-label="Reprendre et lectures récentes">
+      <div className="horizon-hero-shade" aria-hidden="true" />
+      <div className="horizon-resume-copy">
+        <span className="horizon-eyebrow">{resume ? 'Reprendre' : 'À découvrir'}</span>
+        <h2 title={featured.displayTitle}>{featured.displayTitle}</h2>
+        <p>{featured.description || 'Retrouve ta lecture et les œuvres ouvertes récemment.'}</p>
+        <div className="horizon-resume-meta">
+          <span>{featured.chapterCount || 0} chapitres</span>
+          {Number(featured.progressPercent || 0) > 0 ? <span>{featured.progressPercent}% lu</span> : null}
+        </div>
+        <button type="button" className="primary-button horizon-resume-action" onClick={() => onOpen(featured.id)}>
+          {resume ? 'Continuer' : 'Ouvrir'}
+        </button>
+      </div>
+      <div className="horizon-recents">
+        <div className="horizon-recents-heading"><strong>Récents</strong><span>{recents.length} œuvres</span></div>
+        <div className="horizon-recents-rail">
+          {recents.map((manga) => (
+            <button key={manga.id} type="button" className="horizon-recent-card" onClick={() => onOpen(manga.id)} onContextMenu={(event) => onContextMenu(event, { type: 'manga', manga })}>
+              {manga.coverSrc ? <MediaAsset src={manga.coverSrc} thumbnail alt="" loading="lazy" maxWidth={240} maxHeight={360} /> : <span className="cover-fallback">{manga.displayTitle?.[0] || '?'}</span>}
+              <span><strong>{manga.displayTitle}</strong><small>{manga.chapterCount || 0} ch.</small></span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function LibraryView({
   mangas,
   cardSize = 'comfortable',
@@ -110,7 +149,13 @@ function LibraryView({
   showHero = true,
   selectionMode = false,
   selectedIds = new Set(),
-  onToggleSelect
+  onToggleSelect,
+  visualVariant = 'classic',
+  cinematicBackdrop = true,
+  cinematicIntensity = 58,
+  foilEnabled = true,
+  foilIntensity = 28,
+  adaptiveVisualEffects = true
 }) {
   const containerRef = useRef(null);
   const gridRef = useRef(null);
@@ -120,8 +165,10 @@ function LibraryView({
   // n'a pas mesure ses colonnes et termine son unique correction d'ancre.
   const savingBlockedRef = useRef(true);
   const performanceMode = mangas.length >= 150;
-  const minCard = cardSize === 'compact' ? 180 : cardSize === 'large' ? 320 : 240;
+  const baseMetrics = resolveVirtualGridMetrics(cardSize, mangas.length);
+  const minCard = baseMetrics.minCard;
   const [columns, setColumns] = useState(5);
+  const [containerWidth, setContainerWidth] = useState(0);
   const [columnsMeasured, setColumnsMeasured] = useState(false);
 
   useEffect(() => {
@@ -129,14 +176,18 @@ function LibraryView({
     if (!element) return undefined;
     const observer = new ResizeObserver((entries) => {
       entries.forEach((entry) => {
-        const width = entry.contentRect.width - 48;
-        setColumns(Math.max(2, Math.floor(width / minCard)));
+        const width = entry.contentRect.width;
+        const nextLayout = resolveVirtualGridLayout({ cardSize, itemCount: mangas.length, containerWidth: width, visualVariant });
+        setContainerWidth(width);
+        setColumns(visualVariant === 'horizon'
+          ? nextLayout.columns
+          : Math.max(1, Math.floor((Math.max(0, width - 48) + 18) / (minCard + 18))));
         setColumnsMeasured(true);
       });
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [minCard]);
+  }, [cardSize, mangas.length, minCard, visualVariant]);
 
   const rows = useMemo(() => {
     const result = [];
@@ -147,7 +198,8 @@ function LibraryView({
   }, [mangas, columns]);
   const selectionOrder = useMemo(() => mangas.map((manga) => manga.id), [mangas]);
 
-  const rowHeight = cardSize === 'compact' ? 460 : cardSize === 'large' ? 620 : 540;
+  const layout = resolveVirtualGridLayout({ cardSize, itemCount: mangas.length, containerWidth, visualVariant });
+  const rowHeight = containerWidth > 0 ? layout.rowHeight : baseMetrics.rowHeight;
   const initialPosition = normalizeScrollPosition(initialScrollPosition ?? initialScrollTop);
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -158,6 +210,9 @@ function LibraryView({
     overscan: performanceMode ? 0 : 1
   });
   virtualizerRef.current = virtualizer;
+  useLayoutEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   const restoreToken = `${scrollKey || 'library'}:${columns}:${initialPosition.anchorId || 'offset'}:${cardSize}`;
   useLayoutEffect(() => {
@@ -212,7 +267,9 @@ function LibraryView({
   return (
     <section className="library-view" ref={containerRef} onScroll={handleScroll}>
       {showHero && mangas.length > 0 && !selectionMode ? (
-        <HeroCarousel mangas={mangas} onOpen={onOpenManga} onContextMenu={onContextMenu} />
+        visualVariant === 'horizon'
+          ? <HorizonHero mangas={mangas} onOpen={onOpenManga} onContextMenu={onContextMenu} cinematicBackdrop={cinematicBackdrop} cinematicIntensity={cinematicIntensity} />
+          : <HeroCarousel mangas={mangas} onOpen={onOpenManga} onContextMenu={onContextMenu} />
       ) : null}
 
       {mangas.length === 0 ? (
@@ -234,7 +291,11 @@ function LibraryView({
                 width: '100%',
                 height: `${rowHeight}px`,
                 transform: `translateY(${virtualRow.start}px)`,
-                '--grid-columns': columns
+                '--grid-columns': columns,
+                '--manga-grid-gap': `${layout.gap || 18}px`,
+                '--mc-card-height': `${layout.cardHeight || Math.max(1, rowHeight - 18)}px`,
+                '--mc-cover-height': layout.coverHeight ? `${layout.coverHeight}px` : undefined,
+                '--mc-footer-height': layout.footerHeight ? `${layout.footerHeight}px` : undefined
               }}
             >
               {rows[virtualRow.index]?.map((manga) => (
@@ -247,10 +308,14 @@ function LibraryView({
                   onToggleFavorite={onToggleFavorite}
                   onContextMenu={onContextMenu}
                   selectionMode={selectionMode}
-                  selected={selectedIds.has(manga.id)}
+                  selected={selectedIds.has(String(manga.id ?? '').trim())}
                   onToggleSelect={onToggleSelect}
                   selectionOrder={selectionOrder}
                   performanceMode={performanceMode}
+                  visualVariant={visualVariant}
+                  foilEnabled={foilEnabled}
+                  foilIntensity={foilIntensity}
+                  adaptiveVisualEffects={adaptiveVisualEffects}
                 />
               ))}
             </div>

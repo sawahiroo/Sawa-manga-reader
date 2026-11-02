@@ -12,6 +12,8 @@ const pruneTerminalJobs = typeof derivedStore.pruneTerminalJobs === 'function'
 const JOB_PRIORITY = {
   scan: 100,
   analyze: 90,
+  'workbench-analysis': 88,
+  'workbench-apply': 87,
   'source-import': 85,
   export: 80,
   'bulk-trash': 80,
@@ -24,6 +26,8 @@ const JOB_PRIORITY = {
 const JOB_LANE = {
   scan: 'scanAnalyze',
   analyze: 'scanAnalyze',
+  'workbench-analysis': 'network',
+  'workbench-apply': 'network',
   'deep-scan': 'scanAnalyze',
   'source-import': 'network',
   export: 'export',
@@ -33,7 +37,7 @@ const JOB_LANE = {
   upscale: 'heavy'
 };
 
-const IDEMPOTENT_JOBS = new Set(['scan', 'analyze', 'deep-scan', 'source-import', 'ocr', 'hash', 'upscale']);
+const IDEMPOTENT_JOBS = new Set(['scan', 'analyze', 'deep-scan', 'source-import', 'workbench-analysis', 'ocr', 'hash', 'upscale']);
 
 function nowIso() {
   return new Date().toISOString();
